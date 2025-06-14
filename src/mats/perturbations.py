@@ -3,7 +3,6 @@ import re
 def perturb_spatial_words(sentence):
     """
     Perturbs spatial words in a sentence by swapping them with their opposites.
-    
     Swaps:
     - left ↔ right
     - above ↔ below  
@@ -16,7 +15,6 @@ def perturb_spatial_words(sentence):
     Returns:
         str: Sentence with spatial words swapped
     """
-    
     spatial_swaps = {
         'left': 'right',
         'right': 'left',
@@ -28,38 +26,39 @@ def perturb_spatial_words(sentence):
         'behind': 'in front of'
     }
     
-    # a copy of the sentence to work with
     perturbed_sentence = sentence.lower()
     
+    # Swap multi-word expressions first
     for original, replacement in spatial_swaps.items():
         if len(original.split()) > 1:  
-            
             pattern = r'\b' + re.escape(original) + r'\b'
             perturbed_sentence = re.sub(pattern, f"__TEMP_{replacement.replace(' ', '_')}__", 
-                                     perturbed_sentence, flags=re.IGNORECASE)
+                                       perturbed_sentence, flags=re.IGNORECASE)
     
-    # single words
+    # Then swap single words
     for original, replacement in spatial_swaps.items():
-        if len(original.split()) == 1:  # Single words
+        if len(original.split()) == 1:
             pattern = r'\b' + re.escape(original) + r'\b'
             perturbed_sentence = re.sub(pattern, f"__TEMP_{replacement}__", 
-                                     perturbed_sentence, flags=re.IGNORECASE)
+                                       perturbed_sentence, flags=re.IGNORECASE)
     
- 
+    # Replace the temporary tokens with their proper form
     perturbed_sentence = re.sub(r'__TEMP_([^_]+(?:_[^_]+)*)__', 
                                lambda m: m.group(1).replace('_', ' '), 
                                perturbed_sentence)
     
+    # Attempt to restore capitalization from the original
     words_original = sentence.split()
     words_perturbed = perturbed_sentence.split()
     
     final_words = []
-    for i, (orig, pert) in enumerate(zip(words_original, words_perturbed)):
+    for orig, pert in zip(words_original, words_perturbed):
         if orig.isupper():
             final_words.append(pert.upper())
         elif orig.istitle():
             final_words.append(pert.capitalize())
         else:
             final_words.append(pert)
+    final_words += words_perturbed[len(final_words):]
     
     return ' '.join(final_words)

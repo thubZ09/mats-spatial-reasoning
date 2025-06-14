@@ -1,5 +1,7 @@
 from datasets import load_dataset
 
+
+
 def get_sample_data():
     """Returns the small, hard-coded sample dataset for quick testing."""
     vsr_sample_data = [
