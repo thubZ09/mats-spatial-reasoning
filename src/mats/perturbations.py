@@ -1,4 +1,5 @@
 import re
+from PIL import Image
 
 def perturb_spatial_words(sentence):
     """
@@ -62,3 +63,18 @@ def perturb_spatial_words(sentence):
     final_words += words_perturbed[len(final_words):]
     
     return ' '.join(final_words)
+
+def rotate_image(image: Image.Image, angle: int = 10) -> Image.Image:
+    """
+    Rotates a PIL image by a given angle.
+
+    Args:
+        image (Image.Image): The input image.
+        angle (int): The angle in degrees for rotation.
+                       A positive angle means counter-clockwise rotation.
+
+    Returns:
+        Image.Image: The rotated image.
+    """
+    # Using expand=True ensures the entire rotated image fits in the new image size
+    return image.rotate(angle, expand=True)
