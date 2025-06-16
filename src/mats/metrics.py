@@ -1,32 +1,34 @@
-def check_logical_consistency(prediction_original: str, prediction_perturbed: str, caption_original: str) -> str:
+def normalize_response(response: str) -> bool | None:
+    """Convert model output to a structured boolean or None."""
+    if response is None:
+        return None
+    
+    response = response.lower().strip()
+    
+    # Check for affirmative answers
+    if response.startswith("true") or response.startswith("yes"):
+        return True
+    # Check for negative answers
+    elif response.startswith("false") or response.startswith("no"):
+        return False
+    # If the response is not clearly True or False, it's ambiguous
+    else:
+        return None
+
+
+def check_logical_consistency(original_pred: bool | None, perturbed_pred: bool | None) -> str:
     """
-    Checks if two model predictions are logically consistent based on spatial opposition.
-
-    Args:
-        prediction_original: The model's output for the original caption (e.g., 'True').
-        prediction_perturbed: The model's output for the perturbed caption (e.g., 'True').
-        caption_original: The original caption, used to understand the context.
-
-    Returns:
-        'CONSISTENT' or 'INCONSISTENT'.
+    Checks if two normalized boolean predictions are logically consistent.
+    For oppositional pairs (e.g., left/right), consistency means the predictions are opposites.
     """
-    # Normalize predictions to handle variations like "True." vs "true"
-    pred1 = prediction_original.lower().strip().replace('.', '')
-    pred2 = prediction_perturbed.lower().strip().replace('.', '')
+    # If either prediction could not be parsed, we can't determine consistency.
+    if original_pred is None or perturbed_pred is None:
+        return 'INDETERMINATE' # Cannot determine consistency
 
-    # Define simple boolean keywords
-    true_words = ['true', 'yes']
-    false_words = ['false', 'no']
-
-    # Determine if predictions are opposites
-    is_opposite = (pred1 in true_words and pred2 in false_words) or \
-                  (pred1 in false_words and pred2 in true_words)
-
-    # For now, we assume all textual perturbations are oppositional.
-    # A more advanced version could check which words were swapped.
-    if is_opposite:
+    # For spatial opposition, consistency requires the booleans to be different.
+    # e.g., original=True and perturbed=False IS CONSISTENT.
+    if original_pred != perturbed_pred:
         return 'CONSISTENT'
     else:
-        # If the predictions are the same (e.g., True/True) or nonsensical,
-        # it's a failure of logical consistency.
+        # e.g., original=True and perturbed=True IS INCONSISTENT.
         return 'INCONSISTENT'

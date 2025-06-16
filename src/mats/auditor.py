@@ -1,57 +1,46 @@
 import torch
 from tqdm import tqdm
 from .perturbations import perturb_spatial_words
-from .metrics import check_logical_consistency
+from .metrics import normalize_response, check_logical_consistency # Import both
 
 def run_text_perturbation_audit(model, processor, dataset):
-    """
-    Runs the textual perturbation audit on a given dataset.
-
-    Args:
-        model: The loaded vision-language model.
-        processor: The model's processor.
-        dataset: A dictionary containing the data to audit (e.g., from data_loader).
-
-    Returns:
-        A list of dictionaries, where each dictionary contains an audit result.
-    """
     results = []
     
-    # Using tqdm for a nice progress bar
-    for item in tqdm(dataset['train'], desc="Auditing dataset"):
+    for item in tqdm(dataset, desc="Auditing dataset"): # Note: now iterates over a simple list
         original_caption = item['caption']
         
-        # We will deal with real images later. For now, we pass None.
-        image = None # Or item['image'] if it's a loaded PIL image
-        
-        # --- The core audit logic from your notebook ---
-        
-        # 1. Create the perturbed version
-        perturbed_caption = perturb_spatial_words(original_caption)
-        
-        # 2. Get predictions (using a simplified helper function)
-        # Note: A real implementation would handle images properly.
-        # For now, this assumes a text-only or dummy-image scenario.
-        def get_pred_internal(caption_text):
-            prompt = f"USER: <image>\n{caption_text} ASSISTANT:"
-            # A real image would be passed here instead of being ignored
-            inputs = processor(text=prompt, images=image, return_tensors="pt").to("cuda")
-            generate_ids = model.generate(**inputs, max_new_tokens=20)
+        # Helper function for getting raw predictions
+        def get_raw_prediction(caption_text):
+            from PIL import Image
+            dummy_image = Image.new('RGB', (640, 480), color = 'white')
+            prompt = f"USER: <image>\nLook at this image and evaluate: {caption_text}\nIs this statement true or false? Answer with just 'True' or 'False'. ASSISTANT:"
+            inputs = processor(text=prompt, images=dummy_image, return_tensors="pt").to("cuda")
+            with torch.no_grad():
+                generate_ids = model.generate(**inputs, max_new_tokens=10)
             response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             return response.split("ASSISTANT:")[-1].strip()
 
-        original_pred = get_pred_internal(original_caption)
-        perturbed_pred = get_pred_internal(perturbed_caption)
+        # 1. Get raw predictions
+        raw_original_pred = get_raw_prediction(original_caption)
         
-        # 3. Check consistency using the new metrics function
-        is_consistent = check_logical_consistency(original_pred, perturbed_pred, original_caption)
+        perturbed_caption = perturb_spatial_words(original_caption)
+        raw_perturbed_pred = get_raw_prediction(perturbed_caption)
+        
+        # 2. Normalize the raw predictions
+        norm_original_pred = normalize_response(raw_original_pred)
+        norm_perturbed_pred = normalize_response(raw_perturbed_pred)
+
+        # 3. Check for logical consistency
+        consistency = check_logical_consistency(norm_original_pred, norm_perturbed_pred)
         
         results.append({
             'original_caption': original_caption,
             'perturbed_caption': perturbed_caption,
-            'original_prediction': original_pred,
-            'perturbed_prediction': perturbed_pred,
-            'consistency': is_consistent
+            'raw_original_pred': raw_original_pred,
+            'raw_perturbed_pred': raw_perturbed_pred,
+            'norm_original_pred': norm_original_pred,
+            'norm_perturbed_pred': norm_perturbed_pred,
+            'consistency': consistency
         })
         
     return results
