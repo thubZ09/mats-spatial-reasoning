@@ -48,11 +48,11 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset():
-    """Load the juletxara/visual-spatial-reasoning dataset from Hugging Face."""
+    """Load the google-research-datasets/conceptual_captions dataset from Hugging Face."""
     try:
-        logger.info("Attempting to load 'juletxara/visual-spatial-reasoning' dataset from Hugging Face (random config)...")
-        dataset = load_dataset("juletxara/visual-spatial-reasoning", "random", split="train")
-        logger.info("Dataset 'visual-spatial-reasoning' loaded successfully.")
+        logger.info("Attempting to load 'google-research-datasets/conceptual_captions' from Hugging Face...")
+        dataset = load_dataset("google-research-datasets/conceptual_captions", split="train")
+        logger.info("Dataset 'conceptual_captions' loaded successfully.")
 
         processed_data = []
         for i, item in enumerate(dataset):
@@ -60,8 +60,8 @@ def load_vsr_dataset():
                 break
             processed_data.append({
                 'image': item['image'],
-                'caption': item['caption'],
-                'relation_type': item.get('relation_type', 'unknown')
+                'caption': item.get('caption', ''),
+                'relation_type': 'unknown'  # Not present in this dataset
             })
         return processed_data
 
