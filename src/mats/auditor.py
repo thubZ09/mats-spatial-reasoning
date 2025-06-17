@@ -48,16 +48,31 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset():
-    """Load VSR dataset - SIMPLIFIED VERSION"""
+    """Load a suitable visual reasoning dataset (NLVR2)."""
     try:
-        # Directly load without configs
-        dataset = load_dataset("cambridgeltl/visual_spatial_reasoning", "v1.0", split="test")
+        # Load the 'test' split of the public NLVR2 dataset
+        logger.info("Attempting to load 'nlvr2' dataset from Hugging Face...")
+        dataset = load_dataset("nlvr2", split="test")
+        logger.info("Dataset 'nlvr2' loaded successfully.")
         
-        # Process and return first 100 samples
-        return [item for i, item in enumerate(dataset) if i < 100]
+        # Process and return the first 100 samples in the format our audit expects
+        processed_data = []
+        for i, item in enumerate(dataset):
+            if i >= 100:
+                break
+            
+            # NLVR2 uses 'sentence' instead of 'caption'. We map it.
+            processed_data.append({
+                'image': item['image'],
+                'caption': item['sentence'], 
+                'relation_type': 'unknown' # This key is needed, but NLVR2 doesn't provide it directly.
+            })
+        return processed_data
+        
     except Exception as e:
-        logger.error(f"VSR load failed: {e}")
-        # Fallback to synthetic data
+        logger.error(f"Dataset load failed: {e}")
+        logger.warning("Falling back to synthetic data as a last resort.")
+        # Your existing fallback to synthetic data
         return [
             {
                 'image': create_synthetic_image("A red ball is to the left of a blue box"),
@@ -70,7 +85,6 @@ def load_vsr_dataset():
                 'relation_type': 'above'
             }
         ]
-
 def ensure_pil_image(image):
     """Convert various formats to PIL Image"""
     if isinstance(image, Image.Image):
