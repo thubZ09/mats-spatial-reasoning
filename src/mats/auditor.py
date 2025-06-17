@@ -2,15 +2,81 @@ import torch
 from tqdm import tqdm
 from PIL import Image
 import io
+from io import BytesIO
 import re
 import numpy as np
 from transformers import AutoProcessor
 import logging
+from datasets import load_dataset
+import matplotlib.pyplot as plt
 
 #setting up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def load_vsr_dataset():
+    """Load VSR dataset with robust error handling"""
+    try:
+        # Load from Hugging Face with specific configuration and trust flag
+        print("Trying 'random' configuration...")
+        dataset = load_dataset("juletxara/visual-spatial-reasoning", "random", trust_remote_code=True)
+        print("VSR dataset loaded from Hugging Face Hub")
+        
+        # Convert byte images to PIL
+        def convert_to_pil(item):
+            if isinstance(item['image'], bytes):
+                item['image'] = Image.open(BytesIO(item['image']))
+            return item
+        
+        # Process dataset
+        dataset = dataset.map(convert_to_pil)
+        
+        # Filter to test split
+        test_data = dataset['test']
+        print(f"Test split contains {len(test_data)} items")
+        
+        return test_data
+        
+    except Exception as e:
+        logger.error(f"Hugging Face load failed: {e}")
+        print("⚠️ Falling back to minimal synthetic dataset")
+        
+        # Fallback synthetic data
+        synthetic_data = [
+            {
+                'image': Image.new('RGB', (224, 224), (255, 255, 255)),  # White background
+                'caption': "A red ball is to the left of a blue box",
+                'label': 1,
+                'relation_type': 'left'
+            },
+            {
+                'image': Image.new('RGB', (224, 224), (255, 255, 255)),  # White background
+                'caption': "A cat is sitting above the mat",
+                'label': 1,
+                'relation_type': 'above'
+            }
+        ]
+        return synthetic_data
+
+# Load dataset
+real_audit_data = load_vsr_dataset()
+
+# Display sample
+print("\n--- Sample Item ---")
+if len(real_audit_data) > 0:
+    sample_item = real_audit_data[0]
+    print(f"Caption: {sample_item['caption']}")
+    print(f"Relation: {sample_item.get('relation_type', 'unknown')}")
+    try:
+        plt.imshow(np.array(sample_item['image']))
+        plt.axis('off')
+        plt.title("Sample Image")
+        plt.show()
+    except Exception as e:
+        logger.warning(f"Image display failed: {e}")
+else:
+    print("No items in dataset")
 
 def ensure_pil_image(image):
     """Convert various formats to PIL Image"""
