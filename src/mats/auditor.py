@@ -50,18 +50,17 @@ def create_synthetic_image(caption, size=(300, 300)):
 def load_vsr_dataset():
     """Load the juletxara/visual-spatial-reasoning dataset from Hugging Face."""
     try:
-        logger.info("Attempting to load 'juletxara/visual-spatial-reasoning' dataset from Hugging Face...")
-        dataset = load_dataset("juletxara/visual-spatial-reasoning", split="train")
+        logger.info("Attempting to load 'juletxara/visual-spatial-reasoning' dataset from Hugging Face (random config)...")
+        dataset = load_dataset("juletxara/visual-spatial-reasoning", "random", split="train")
         logger.info("Dataset 'visual-spatial-reasoning' loaded successfully.")
 
-        # Process and return the first 100 samples in the format our audit expects
         processed_data = []
         for i, item in enumerate(dataset):
             if i >= 100:
                 break
             processed_data.append({
                 'image': item['image'],
-                'caption': item['caption'], 
+                'caption': item['caption'],
                 'relation_type': item.get('relation_type', 'unknown')
             })
         return processed_data
