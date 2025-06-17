@@ -48,47 +48,16 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset():
-    """Load VSR dataset with robust error handling"""
+    """Load VSR dataset - SIMPLIFIED VERSION"""
     try:
-        # Try both configurations without trust_remote_code
-        for config in ['random', 'zeroshot']:
-            try:
-                logger.info(f"Trying configuration: {config}")
-                dataset = load_dataset("juletxara/visual-spatial-reasoning", config)
-                logger.info("✅ VSR dataset loaded successfully!")
-                
-                # Process dataset
-                if isinstance(dataset, dict) and 'train' in dataset:
-                    if 'test' not in dataset:
-                        train_data = dataset['train']
-                        if hasattr(train_data, 'train_test_split'):
-                            split_dataset = train_data.train_test_split(test_size=0.2)
-                            test_data = split_dataset['test']
-                        else:
-                            raise ValueError("Dataset does not support train_test_split")
-                    else:
-                        test_data = dataset['test']
-                else:
-                    raise ValueError("Dataset format not recognized")
-                
-                # Convert byte images to PIL
-                def convert_to_pil(item):
-                    if isinstance(item['image'], bytes):
-                        item['image'] = Image.open(BytesIO(item['image']))
-                    return item
-                
-                test_data = test_data.map(convert_to_pil)
-                return test_data
-            except Exception as e:
-                logger.warning(f"Config '{config}' failed: {str(e)}")
+        # Directly load without configs
+        dataset = load_dataset("cambridgeltl/visual_spatial_reasoning", "v1.0", split="test")
         
-        raise RuntimeError("All configurations failed")
-        
+        # Process and return first 100 samples
+        return [item for i, item in enumerate(dataset) if i < 100]
     except Exception as e:
-        logger.error(f"Dataset load failed: {str(e)}")
-        logger.info("⚠️ Falling back to synthetic dataset")
-        
-        # Fallback synthetic data
+        logger.error(f"VSR load failed: {e}")
+        # Fallback to synthetic data
         return [
             {
                 'image': create_synthetic_image("A red ball is to the left of a blue box"),
@@ -157,19 +126,27 @@ def check_logical_consistency(orig_pred, pert_pred, relation_type):
     return 'CONSISTENT' if orig_pred == pert_pred else 'INCONSISTENT'
 
 def perturb_spatial_words(sentence):
-    """Perturb spatial relationships in text"""
+    """Perturb spatial relationships in text - FIXED VERSION"""
     swaps = {
-        'left': 'right', 'right': 'left',
-        'above': 'below', 'below': 'above',
-        'top': 'bottom', 'bottom': 'top',
-        'in front of': 'behind', 'behind': 'in front of',
-        'front': 'back', 'back': 'front'
+        r'\bleft\b': 'right',
+        r'\bright\b': 'left',
+        r'\babove\b': 'below',
+        r'\bbelow\b': 'above',
+        r'\btop\b': 'bottom',
+        r'\bbottom\b': 'top',
+        r'\bin front of\b': 'behind',
+        r'\bbehind\b': 'in front of',
+        r'\bfront\b': 'back',
+        r'\bback\b': 'front',
+        r'\bnorth\b': 'south',
+        r'\bsouth\b': 'north',
+        r'\beast\b': 'west',
+        r'\bwest\b': 'east'
     }
     
-    # Case-insensitive replacement
+    # Case-insensitive replacement with word boundaries
     for orig, repl in swaps.items():
-        pattern = r'\b' + re.escape(orig) + r'\b'
-        sentence = re.sub(pattern, repl, sentence, flags=re.IGNORECASE)
+        sentence = re.sub(orig, repl, sentence, flags=re.IGNORECASE)
     
     return sentence
 
