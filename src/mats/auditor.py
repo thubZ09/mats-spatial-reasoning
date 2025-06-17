@@ -59,7 +59,7 @@ def load_vsr_dataset():
             if i >= 100:
                 break
             processed_data.append({
-                'image': item['image'],
+                'image': item['image_url'],  # <-- changed here
                 'caption': item.get('caption', ''),
                 'relation_type': 'unknown'  # Not present in this dataset
             })
