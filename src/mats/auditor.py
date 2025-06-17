@@ -48,24 +48,24 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset():
-    """Load a suitable visual reasoning dataset (CLEVR as fallback)."""
+    """Load the juletxara/visual-spatial-reasoning dataset from Hugging Face."""
     try:
-        logger.info("Attempting to load 'clevr' dataset from Hugging Face...")
-        dataset = load_dataset("clevr", split="train")
-        logger.info("Dataset 'clevr' loaded successfully.")
-        
-        # Process and return the first 100 samples in the expected format
+        logger.info("Attempting to load 'juletxara/visual-spatial-reasoning' dataset from Hugging Face...")
+        dataset = load_dataset("juletxara/visual-spatial-reasoning", split="train")
+        logger.info("Dataset 'visual-spatial-reasoning' loaded successfully.")
+
+        # Process and return the first 100 samples in the format our audit expects
         processed_data = []
         for i, item in enumerate(dataset):
             if i >= 100:
                 break
             processed_data.append({
-                'image': item['image'],              # This will be a PIL.Image in some configs, or path
-                'caption': item['question'],         # CLEVR has questions instead of captions
-                'relation_type': 'unknown'           # CLEVR doesn't have this key
+                'image': item['image'],
+                'caption': item['caption'], 
+                'relation_type': item.get('relation_type', 'unknown')
             })
         return processed_data
-        
+
     except Exception as e:
         logger.error(f"Dataset load failed: {e}")
         logger.warning("Falling back to synthetic data as a last resort.")
