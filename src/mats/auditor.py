@@ -48,31 +48,27 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset():
-    """Load a suitable visual reasoning dataset (NLVR2)."""
+    """Load a suitable visual reasoning dataset (CLEVR as fallback)."""
     try:
-        # Load the 'test' split of the public NLVR2 dataset
-        logger.info("Attempting to load 'nlvr2' dataset from Hugging Face...")
-        dataset = load_dataset("nlvr2", split="test")
-        logger.info("Dataset 'nlvr2' loaded successfully.")
+        logger.info("Attempting to load 'clevr' dataset from Hugging Face...")
+        dataset = load_dataset("clevr", split="train")
+        logger.info("Dataset 'clevr' loaded successfully.")
         
-        # Process and return the first 100 samples in the format our audit expects
+        # Process and return the first 100 samples in the expected format
         processed_data = []
         for i, item in enumerate(dataset):
             if i >= 100:
                 break
-            
-            # NLVR2 uses 'sentence' instead of 'caption'. We map it.
             processed_data.append({
-                'image': item['image'],
-                'caption': item['sentence'], 
-                'relation_type': 'unknown' # This key is needed, but NLVR2 doesn't provide it directly.
+                'image': item['image'],              # This will be a PIL.Image in some configs, or path
+                'caption': item['question'],         # CLEVR has questions instead of captions
+                'relation_type': 'unknown'           # CLEVR doesn't have this key
             })
         return processed_data
         
     except Exception as e:
         logger.error(f"Dataset load failed: {e}")
         logger.warning("Falling back to synthetic data as a last resort.")
-        # Your existing fallback to synthetic data
         return [
             {
                 'image': create_synthetic_image("A red ball is to the left of a blue box"),
@@ -85,6 +81,7 @@ def load_vsr_dataset():
                 'relation_type': 'above'
             }
         ]
+    
 def ensure_pil_image(image):
     """Convert various formats to PIL Image"""
     if isinstance(image, Image.Image):
