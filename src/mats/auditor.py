@@ -50,11 +50,11 @@ def create_synthetic_image(caption, size=(300, 300)):
 def load_vsr_dataset():
     """Load VSR dataset with robust error handling"""
     try:
-        # Try both configurations
+        # Try both configurations without trust_remote_code
         for config in ['random', 'zeroshot']:
             try:
                 logger.info(f"Trying configuration: {config}")
-                dataset = load_dataset("juletxara/visual-spatial-reasoning", config, trust_remote_code=True)
+                dataset = load_dataset("juletxara/visual-spatial-reasoning", config)
                 logger.info("✅ VSR dataset loaded successfully!")
                 
                 # Process dataset
