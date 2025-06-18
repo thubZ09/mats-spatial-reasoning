@@ -59,7 +59,7 @@ def load_vsr_dataset(num_samples=100):
 
     try:
         logger.info(f"Attempting to load '{dataset_name}' from Hugging Face...")
-        dataset = load_dataset(dataset_name, config_name, split=split, streaming=True, trust_remote_code=True)
+        dataset = load_dataset(dataset_name, config_name, split=split, streaming=True)
         logger.info("Dataset loaded successfully. Filtering for spatial captions...")
 
         processed_data = []
