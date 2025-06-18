@@ -10,6 +10,7 @@ from datasets import load_dataset
 import logging
 import sys
 import matplotlib.pyplot as plt
+from PIL import Image
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -82,16 +83,15 @@ def load_vsr_dataset():
         ]
     
 def ensure_pil_image(image):
-    """Convert various formats to PIL Image"""
     if isinstance(image, Image.Image):
         return image
-    if isinstance(image, bytes):
-        return Image.open(BytesIO(image))
-    if isinstance(image, np.ndarray):
-        return Image.fromarray(image)
-    if isinstance(image, str):  # File path
-        return Image.open(image)
-    return Image.fromarray(np.array(image))  # Last resort
+    elif isinstance(image, str) and image.startswith('http'):
+        response = requests.get(image)
+        img = Image.open(BytesIO(response.content)).convert("RGB")
+        return img
+    else:
+        # Handle other cases or raise
+        raise ValueError("Unknown image format: {}".format(type(image))) # Last resort
 
 def normalize_response(response):
     """Convert model response to boolean"""
