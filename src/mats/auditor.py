@@ -53,13 +53,13 @@ def load_vsr_dataset(num_samples=100):
     Loads and processes the REAL Visual Spatial Reasoning dataset.
     """
     dataset_name = "juletxara/visual-spatial-reasoning"
-    config_name = "random"
+    config_name = "zeroshot"
     split = "test"
     spatial_keywords = ['left', 'right', 'above', 'below', 'top', 'bottom', 'in front of', 'behind']
 
     try:
         logger.info(f"Attempting to load '{dataset_name}' from Hugging Face...")
-        dataset = load_dataset(dataset_name, split=split, streaming=True)
+        dataset = load_dataset(dataset_name, config_name, split=split, streaming=True)
         logger.info("Dataset loaded successfully. Filtering for spatial captions...")
 
         processed_data = []
