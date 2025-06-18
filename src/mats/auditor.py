@@ -60,7 +60,7 @@ def load_vsr_dataset(num_samples=100):
 
     try:
         logger.info(f"Loading {dataset_name}...")
-        ds = load_dataset(dataset_name, config_name, split=split, trust_remote_code=True)
+        ds = load_dataset(dataset_name, config_name, split=split)
         # Instruct HF to decode the "image" column as PIL Images:
         ds = ds.cast_column("image", DatasetsImage())
 
