@@ -1,46 +1,91 @@
 from datasets import load_dataset
+from PIL import Image
+import io
+import logging
+from typing import Dict, Any, List
 
+logger = logging.getLogger(__name__)
 
+SPATIAL_KEYWORDS = ['left', 'right', 'above', 'below', 'top', 'bottom', 'in front of', 'behind', 'front', 'back']
 
-def get_sample_data():
-    """Returns the small, hard-coded sample dataset for quick testing."""
-    vsr_sample_data = [
-        {'image': 'image_001.jpg', 'caption': 'The red ball is to the left of the blue box.', 'label': 1},
-        {'image': 'image_002.jpg', 'caption': 'The cat is sitting above the mat on the floor.', 'label': 1},
-        {'image': 'image_003.jpg', 'caption': 'The car is parked behind the large tree.', 'label': 1},
-        {'image': 'image_004.jpg', 'caption': 'The bird is perched at the top of the building.', 'label': 1},
-        {'image': 'image_005.jpg', 'caption': 'The book is placed below the computer monitor.', 'label': 1},
-        {'image': 'image_006.jpg', 'caption': 'The dog is standing in front of the house door.', 'label': 1},
-        {'image': 'image_007.jpg', 'caption': 'The flower pot is positioned to the right of the window.', 'label': 1},
-        {'image': 'image_008.jpg', 'caption': 'The lamp is at the bottom of the staircase.', 'label': 1},
-        {'image': 'image_009.jpg', 'caption': 'The picture frame is above the fireplace and to the left of the clock.', 'label': 1},
-        {'image': 'image_010.jpg', 'caption': 'The coffee cup is on the table, in front of the laptop.', 'label': 1}
-    ]
-    return {'train': vsr_sample_data, 'test': vsr_sample_data[:5]}
+def get_relation_type(caption):
+    """Finds the first spatial keyword in a caption."""
+    caption_lower = caption.lower()
+    for keyword in SPATIAL_KEYWORDS:
+        if keyword in caption_lower:
+            return keyword
+    return 'non-spatial'
 
-def get_vsr_dataset():
-    """Downloads and returns the real VSR dataset from Hugging Face."""
-    try:
-        dataset = load_dataset("juletxara/visual-spatial-reasoning")
-        return dataset['random']
-    except Exception as e:
-        print(f"Failed to load dataset from Hugging Face: {e}")
-        return None
-
-def get_data(use_sample: bool = True):
+def process_and_filter_dataset(num_samples=100):
     """
-    Main data loading function.
-    
+    Loads, processes, and filters the VSR dataset.
+
     Args:
-        use_sample (bool): If True, returns the small hard-coded sample dataset.
-                           If False, attempts to download and return the full VSR dataset.
-    
+        num_samples (int): The number of samples to load and process.
+
     Returns:
-        A dataset dictionary.
+        A list of processed data items.
     """
-    if use_sample:
-        print("Loading sample dataset.")
-        return get_sample_data()
-    else:
-        print("Loading full VSR dataset from Hugging Face.")
-        return get_vsr_dataset()
+    dataset_name = "juletxara/visual-spatial-reasoning"
+    config_name = "random"  # This dataset has a 'random' and 'zeroshot' configuration
+    split = "test"
+
+    try:
+        # Load the dataset from Hugging Face
+        logger.info(f"Loading dataset '{dataset_name}' (config: '{config_name}') with split '{split}'...")
+        # Use streaming=True and trust_remote_code=True for robustness
+        full_dataset = load_dataset(dataset_name, config_name, split=split, streaming=True, trust_remote_code=True)
+        logger.info("Dataset loaded successfully.")
+
+        processed_data = []
+        count = 0
+        
+        print("Filtering for spatial captions and processing images...")
+        for item in full_dataset:
+            if count >= num_samples:
+                break
+
+            # Ensure item is treated as a dictionary
+            if isinstance(item, dict):
+                caption = item.get('caption')
+                image_data = item.get('image')
+                image_url = item.get('image_link')
+                label = item.get('label')
+            else:
+                # If item is not a dict, skip it
+                logger.warning(f"Skipping non-dictionary item: {type(item)}")
+                continue
+
+            if not caption or not image_url:
+                continue # Skip items with missing data
+
+            # Filter for captions that contain our spatial keywords
+            relation_type = get_relation_type(caption)
+            if relation_type == 'non-spatial':
+                continue # Skip non-spatial captions
+
+            try:
+                # Download the image from the URL
+                import requests
+                response = requests.get(image_url, stream=True)
+                response.raise_for_status() # Raise an exception for bad status codes
+                image = Image.open(response.raw).convert("RGB")
+                
+                processed_data.append({
+                    'image': image,
+                    'caption': caption,
+                    'label': label,
+                    'relation_type': relation_type
+                })
+                count += 1
+
+            except Exception as e:
+                logger.warning(f"Skipping item due to image download/processing error: {e}")
+                continue
+
+        logger.info(f"Processed and filtered {len(processed_data)} spatial reasoning samples.")
+        return processed_data
+
+    except Exception as e:
+        logger.error(f"Failed to load or process dataset '{dataset_name}': {e}")
+        return [] # Return an empty list on failure

@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import io
 import re
 import numpy as np
@@ -48,27 +48,61 @@ def create_synthetic_image(caption, size=(300, 300)):
     
     return img
 
-def load_vsr_dataset():
-    """Load the google-research-datasets/conceptual_captions dataset from Hugging Face."""
+def load_vsr_dataset(num_samples=100):
+    """
+    Loads and processes the REAL Visual Spatial Reasoning dataset.
+    """
+    dataset_name = "juletxara/visual-spatial-reasoning"
+    config_name = "random"
+    split = "test"
+    spatial_keywords = ['left', 'right', 'above', 'below', 'top', 'bottom', 'in front of', 'behind']
+
     try:
-        logger.info("Attempting to load 'google-research-datasets/conceptual_captions' from Hugging Face...")
-        dataset = load_dataset("google-research-datasets/conceptual_captions", split="train")
-        logger.info("Dataset 'conceptual_captions' loaded successfully.")
+        logger.info(f"Attempting to load '{dataset_name}' from Hugging Face...")
+        dataset = load_dataset(dataset_name, config_name, split=split, streaming=True, trust_remote_code=True)
+        logger.info("Dataset loaded successfully. Filtering for spatial captions...")
 
         processed_data = []
-        for i, item in enumerate(dataset):
-            if i >= 100:
+        for item in dataset:
+            if len(processed_data) >= num_samples:
                 break
-            processed_data.append({
-                'image': item['image_url'],  # <-- changed here
-                'caption': item.get('caption', ''),
-                'relation_type': 'unknown'  # Not present in this dataset
-            })
+
+            # Ensure item is treated as a dictionary
+            if isinstance(item, dict):
+                caption = item.get('caption')
+                image_url = item.get('image_link')
+            else:
+                # If item is not a dict, skip it
+                logger.warning(f"Skipping non-dictionary item: {type(item)}")
+                continue
+
+            if not caption or not image_url:
+                continue
+
+            # Filter for captions that contain our spatial keywords
+            relation_type = next((word for word in spatial_keywords if word in caption.lower()), None)
+
+            if relation_type:
+                try:
+                    # Download the image from the URL
+                    response = requests.get(image_url, stream=True, timeout=10)
+                    response.raise_for_status()
+                    image = Image.open(response.raw).convert("RGB")
+                    
+                    processed_data.append({
+                        'image': image,
+                        'caption': caption,
+                        'relation_type': relation_type
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not download or process image from {image_url}: {e}")
+
+        logger.info(f"Loaded and processed {len(processed_data)} spatial reasoning samples.")
         return processed_data
 
     except Exception as e:
         logger.error(f"Dataset load failed: {e}")
-        logger.warning("Falling back to synthetic data as a last resort.")
+        logger.warning("Falling back to a small synthetic dataset.")
         return [
             {
                 'image': create_synthetic_image("A red ball is to the left of a blue box"),
