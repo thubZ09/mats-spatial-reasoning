@@ -7,7 +7,7 @@ import re
 import numpy as np
 import requests
 from io import BytesIO
-from datasets import load_dataset
+from datasets import load_dataset, Image as DatasetsImage
 import logging
 import sys
 import matplotlib.pyplot as plt
@@ -50,74 +50,60 @@ def create_synthetic_image(caption, size=(300, 300)):
     return img
 
 def load_vsr_dataset(num_samples=100):
-    dataset_name = "juletxara/visual-spatial-reasoning"
-    config_name = "zeroshot"
-    split = "test"
-    spatial_keywords = ['left', 'right', 'above', 'below', 'top', 'bottom', 'in front of', 'behind']
-    
+    """
+    Loads the juletxara/visual-spatial-reasoning set with real PIL Images.
+    """
+    dataset_name  = "juletxara/visual-spatial-reasoning"
+    config_name   = "zeroshot"
+    split         = "test"
+    spatial_kw    = ['left','right','above','below','top','bottom','in front of','behind']
+
     try:
-        logger.info(f"Attempting to load '{dataset_name}' from Hugging Face...")
-        dataset = load_dataset(dataset_name, config_name, split=split, streaming=True)
-        logger.info("Dataset loaded successfully. Filtering for spatial captions...")
-        
-        processed_data = []
-        for item in dataset:
-            if len(processed_data) >= num_samples:
+        logger.info(f"Loading {dataset_name}...")
+        ds = load_dataset(dataset_name, config_name, split=split, trust_remote_code=True)
+        # Instruct HF to decode the "image" column as PIL Images:
+        ds = ds.cast_column("image", DatasetsImage())
+
+        processed = []
+        for item in ds:
+            if len(processed) >= num_samples:
                 break
-            
-            if not isinstance(item, dict):
-                logger.warning("Skipping non-dict item")
+
+            # index directly rather than .get()
+            caption = item["caption"]  # type: ignore[index]
+            image   = item["image"]  # type: ignore[index]
+
+            if not caption or image is None:
                 continue
-                
-            caption = item.get('caption')
-            # CHANGED: Use 'image' field directly (not 'image_link')
-            image_data = item.get('image')
-            
-            if not caption or not image_data:
+
+            # filter for spatial keywords
+            rel = next((kw for kw in spatial_kw if kw in caption.lower()), None)
+            if not rel:
                 continue
-                
-            relation_type = next((word for word in spatial_keywords if word in caption.lower()), None)
-            if not relation_type:
-                continue
-                
-            try:
-                # CHANGED: Handle image data correctly
-                if isinstance(image_data, str) and image_data.startswith('http'):
-                    # If image_data is a URL
-                    response = requests.get(image_data, timeout=10)
-                    image = Image.open(BytesIO(response.content)).convert("RGB")
-                elif isinstance(image_data, bytes):
-                    # If image_data is raw bytes
-                    image = Image.open(BytesIO(image_data)).convert("RGB")
-                elif isinstance(image_data, Image.Image):
-                    # If already a PIL Image
-                    image = image_data.convert("RGB")
-                else:
-                    raise ValueError(f"Unknown image format: {type(image_data)}")
-                    
-                processed_data.append({
-                    'image': image,
-                    'caption': caption,
-                    'relation_type': relation_type
-                })
-                
-            except Exception as e:
-                logger.warning(f"Image processing error: {e}")
-                continue
-                
-        logger.info(f"Loaded and processed {len(processed_data)} spatial reasoning samples.")
-        return processed_data
-        
+
+            processed.append({
+                "image": image.convert("RGB"),
+                "caption": caption,
+                "relation_type": rel
+            })
+
+        logger.info(f"Loaded {len(processed)} VSR samples.")
+        return processed
+
     except Exception as e:
-        logger.error(f"Dataset load failed: {e}")
-        logger.warning("Falling back to synthetic dataset...")
+        logger.error(f"Real load failed: {e}")
+        logger.warning("Using synthetic fallback.")
         return [
-            {'image': create_synthetic_image("A red ball is to the left of a blue box"), 
-             'caption': "A red ball is to the left of a blue box", 
-             'relation_type': 'left'},
-            {'image': create_synthetic_image("A cat is sitting above the mat"), 
-             'caption': "A cat is sitting above the mat", 
-             'relation_type': 'above'}
+            {
+               "image": create_synthetic_image("A red ball is to the left of a blue box"),
+               "caption": "A red ball is to the left of a blue box",
+               "relation_type": "left"
+            },
+            {
+               "image": create_synthetic_image("A cat is sitting above the mat"),
+               "caption": "A cat is sitting above the mat",
+               "relation_type": "above"
+            }
         ]
     
 def ensure_pil_image(image):
