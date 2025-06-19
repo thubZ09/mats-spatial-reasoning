@@ -54,30 +54,32 @@ def create_synthetic_image(caption, size=(300, 300)):
 
 def load_vsr_dataset(split='test', num_samples=100):
     """
-    Robust VSR dataset loader with detailed logging
+    Fixed VSR dataset loader with proper relation mapping and image URL handling
     """
-    spatial_kw = {'left', 'right', 'above', 'below', 'front', 'behind'}
-    dataset = []
-    stats = {
-        'total': 0,
-        'invalid_label': 0,
-        'invalid_relation': 0,
-        'image_fail': 0
+    
+    # Expanded relation mapping
+    RELATION_MAPPING = {
+        'left': ['left', 'left of', 'on the left of', 'at the left side of'],
+        'right': ['right', 'right of', 'on the right of', 'at the right side of'],
+        'above': ['above', 'over', 'on top of'],
+        'below': ['below', 'under', 'underneath', 'beneath'],
+        'front': ['in front of', 'front', 'ahead of'],
+        'behind': ['behind', 'back', 'in back of', 'at the back of']
     }
+    
+    # Reverse mapping for quick lookup
+    ALL_VALID_RELATIONS = {alt: main for main, alts in RELATION_MAPPING.items() for alt in alts}
+    
+    dataset = []
+    stats = {'total': 0, 'invalid_label': 0, 'invalid_relation': 0, 'image_fail': 0}
 
+    # Use the primary file (without .1 suffix)
     file_path = f"{split}.jsonl"
     
-    # Check file exists and is valid
     if not os.path.exists(file_path):
         logger.error(f"File not found: {file_path}")
-        logger.warning("Falling back to Hugging Face dataset")
         return load_hf_fallback(num_samples)
     
-    if os.path.getsize(file_path) == 0:
-        logger.error(f"Empty file: {file_path}")
-        logger.warning("Falling back to Hugging Face dataset")
-        return load_hf_fallback(num_samples)
-
     try:
         logger.info(f"Loading VSR from {file_path}...")
         
@@ -90,29 +92,32 @@ def load_vsr_dataset(split='test', num_samples=100):
                 try:
                     item = json.loads(line)
                     
-                    # Skip false relations (label = False)
+                    # Skip if not a true spatial relation
                     if not item.get('label', False):
                         stats['invalid_label'] += 1
                         continue
                     
-                    # Normalize relation
-                    relation = item.get('relation', '').lower().strip()
-                    if relation == "in front of":
-                        relation = "front"
+                    # Normalize and map relation
+                    raw_relation = item.get('relation', '').lower().strip()
+                    relation = ALL_VALID_RELATIONS.get(raw_relation)
                     
-                    # Skip invalid relations
-                    if relation not in spatial_kw:
+                    if not relation:
                         stats['invalid_relation'] += 1
+                        logger.debug(f"Skipped relation: {raw_relation}")
                         continue
                     
-                    # Download image with timeout
+                    # Construct proper image URL
+                    image_filename = item['image']
+                    image_url = f"https://images.cocodataset.org/train2014/COCO_train2014_{image_filename}"
+                    
+                    # Download image
                     try:
-                        response = requests.get(item['image'], timeout=5)
+                        response = requests.get(image_url, timeout=10)
                         response.raise_for_status()
                         image = Image.open(BytesIO(response.content)).convert("RGB")
                     except Exception as e:
                         stats['image_fail'] += 1
-                        logger.debug(f"Image failed: {item['image']} - {str(e)}")
+                        logger.debug(f"Image failed: {image_url} - {str(e)}")
                         continue
                     
                     dataset.append({
@@ -121,31 +126,21 @@ def load_vsr_dataset(split='test', num_samples=100):
                         "relation_type": relation
                     })
                     
-                except json.JSONDecodeError:
-                    logger.error(f"JSON decode error on line: {line[:50]}...")
                 except Exception as e:
-                    logger.error(f"Unexpected error: {str(e)}")
-
-        # Log detailed statistics
-        logger.info(f"Processing stats for {file_path}:")
-        logger.info(f" - Total lines: {stats['total']}")
-        logger.info(f" - Valid samples: {len(dataset)}")
-        logger.info(f" - Skipped (invalid label): {stats['invalid_label']}")
-        logger.info(f" - Skipped (invalid relation): {stats['invalid_relation']}")
-        logger.info(f" - Skipped (image failed): {stats['image_fail']}")
+                    logger.error(f"Error processing item: {str(e)}")
         
-        if not dataset:
-            logger.warning("No valid samples found! Falling back to HF dataset")
-            return load_hf_fallback(num_samples)
-            
+        logger.info(f"Loaded {len(dataset)}/{stats['total']} samples")
+        logger.info(f"Skipped: {stats['invalid_label']} bad labels, "
+                   f"{stats['invalid_relation']} bad relations, "
+                   f"{stats['image_fail']} image failures")
+        
         return dataset
 
     except Exception as e:
-        logger.error(f"Critical load failure: {str(e)}")
+        logger.error(f"Critical error: {str(e)}")
         return load_hf_fallback(num_samples)
 
 def load_hf_fallback(num_samples):
-    """Fallback to Hugging Face dataset"""
     try:
         logger.warning("Attempting Hugging Face fallback...")
         ds = load_dataset("juletxara/visual-spatial-reasoning", "zeroshot", split="test")
@@ -158,7 +153,7 @@ def load_hf_fallback(num_samples):
             if len(processed) >= num_samples:
                 break
                 
-            caption = item["caption"] # type: ignore[index]
+            caption = item["caption"]  # type: ignore[index]
             image = item["image"]      # type: ignore[index]
             
             if not caption or image is None:
@@ -181,12 +176,12 @@ def load_hf_fallback(num_samples):
     except Exception as e:
         logger.error(f"HF fallback failed: {e}")
         logger.warning("Using synthetic fallback")
-        # Add synthetic data creator if needed
+        # Create simple images without external dependencies
         return [
             {
-               "image": Image.new('RGB', (200, 200), color='red'),
-               "caption": "Synthetic: Red ball left of blue box",
-               "relation_type": "left"
+                "image": Image.new('RGB', (200, 200), color=(255, 0, 0)),  # Red
+                "caption": "Synthetic: Red square",
+                "relation_type": "left"
             }
         ]
     
