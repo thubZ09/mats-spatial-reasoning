@@ -12,6 +12,9 @@ import logging
 import sys
 import matplotlib.pyplot as plt
 from PIL import Image
+import json
+import os
+
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -49,50 +52,107 @@ def create_synthetic_image(caption, size=(300, 300)):
     
     return img
 
-def load_vsr_dataset(num_samples=100):
+def load_vsr_dataset(split='test', num_samples=100):
     """
-    Loads the juletxara/visual-spatial-reasoning set with real PIL Images.
+    Loads VSR dataset from local JSONL files with real PIL Images
     """
-    dataset_name  = "juletxara/visual-spatial-reasoning"
-    config_name   = "zeroshot"
-    split         = "test"
-    spatial_kw    = ['left','right','above','below','top','bottom','in front of','behind']
+    spatial_kw = ['left', 'right', 'above', 'below', 'front', 'behind']
+    dataset = []
 
+    # Define file path based on split
+    file_path = f"{split}.jsonl"
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        logger.error(f"Dataset file not found: {file_path}")
+        logger.warning("Falling back to Hugging Face dataset")
+        return load_hf_fallback(num_samples)
+    
     try:
-        logger.info(f"Loading {dataset_name}...")
-        ds = load_dataset(dataset_name, config_name, split=split)
-        # Instruct HF to decode the "image" column as PIL Images:
-        ds = ds.cast_column("image", DatasetsImage())
+        logger.info(f"Loading VSR dataset from {file_path}...")
+        
+        with open(file_path, 'r') as f:
+            for line in f:
+                if len(dataset) >= num_samples:
+                    break
+                
+                try:
+                    item = json.loads(line)
+                    
+                    # Skip if not a true spatial relation
+                    if not item.get('label', False):
+                        continue
+                    
+                    # Get relation type (normalize to match spatial_kw)
+                    relation = item.get('relation', '').lower()
+                    if relation == "in front of":
+                        relation = "front"
+                    
+                    # Skip invalid relations
+                    if relation not in spatial_kw:
+                        continue
+                    
+                    # Download and process image
+                    image_url = item['image']
+                    response = requests.get(image_url, stream=True, timeout=10)
+                    response.raise_for_status()
+                    image = Image.open(response.raw).convert("RGB")
+                    
+                    dataset.append({
+                        "image": image,
+                        "caption": item['caption'],
+                        "relation_type": relation
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"Error processing item: {e}")
+                    continue
 
+        logger.info(f"Loaded {len(dataset)} VSR samples from {split} split")
+        return dataset
+
+    except Exception as e:
+        logger.error(f"Local dataset load failed: {e}")
+        logger.warning("Falling back to Hugging Face dataset")
+        return load_hf_fallback(num_samples)
+
+def load_hf_fallback(num_samples):
+    """Fallback to Hugging Face dataset if local load fails"""
+    try:
+        logger.warning("Attempting Hugging Face fallback...")
+        ds = load_dataset("juletxara/visual-spatial-reasoning", "zeroshot", split="test")
+        ds = ds.cast_column("image", DatasetsImage())
+        
         processed = []
+        spatial_kw = ['left','right','above','below','front','behind']
+        
         for item in ds:
             if len(processed) >= num_samples:
                 break
-
-            # index directly rather than .get()
-            caption = item["caption"]  # type: ignore[index]
-            image   = item["image"]  # type: ignore[index]
-
+                
+            caption = item["caption"] # type: ignore[index]
+            image = item["image"]     # type: ignore[index]
+            
             if not caption or image is None:
                 continue
-
-            # filter for spatial keywords
+                
+            # Find spatial keyword
             rel = next((kw for kw in spatial_kw if kw in caption.lower()), None)
             if not rel:
                 continue
-
+                
             processed.append({
                 "image": image.convert("RGB"),
                 "caption": caption,
                 "relation_type": rel
             })
-
-        logger.info(f"Loaded {len(processed)} VSR samples.")
+            
+        logger.info(f"Loaded {len(processed)} samples from Hugging Face fallback")
         return processed
-
+        
     except Exception as e:
-        logger.error(f"Real load failed: {e}")
-        logger.warning("Using synthetic fallback.")
+        logger.error(f"Hugging Face fallback failed: {e}")
+        logger.warning("Using synthetic fallback")
         return [
             {
                "image": create_synthetic_image("A red ball is to the left of a blue box"),
