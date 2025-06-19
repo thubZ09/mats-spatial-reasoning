@@ -51,13 +51,13 @@ def create_synthetic_image(caption, size=(300, 300)):
             draw.rectangle((125, 50, 225, 100), fill='brown')  # Top mat
     
     return img
-
+    
 def load_vsr_dataset(split='test', num_samples=100):
     """
-    Fixed VSR dataset loader with proper relation mapping and image URL handling
+    Fixed VSR dataset loader that correctly reads from the local .jsonl file
+    and iterates until enough valid samples are found.
     """
-    
-    # Expanded relation mapping
+    # ... (Your RELATION_MAPPING and ALL_VALID_RELATIONS are perfect, keep them) ...
     RELATION_MAPPING = {
         'left': ['left', 'left of', 'on the left of', 'at the left side of'],
         'right': ['right', 'right of', 'on the right of', 'at the right side of'],
@@ -66,58 +66,53 @@ def load_vsr_dataset(split='test', num_samples=100):
         'front': ['in front of', 'front', 'ahead of'],
         'behind': ['behind', 'back', 'in back of', 'at the back of']
     }
-    
-    # Reverse mapping for quick lookup
     ALL_VALID_RELATIONS = {alt: main for main, alts in RELATION_MAPPING.items() for alt in alts}
-    
-    dataset = []
-    stats = {'total': 0, 'invalid_label': 0, 'invalid_relation': 0, 'image_fail': 0}
 
-    # Use the primary file (without .1 suffix)
+    dataset = []
+    stats = {'lines_read': 0, 'skipped_relations': 0, 'image_failures': 0}
     file_path = f"{split}.jsonl"
-    
+
     if not os.path.exists(file_path):
-        logger.error(f"File not found: {file_path}")
-        return load_hf_fallback(num_samples)
-    
+        logger.error(f"File not found: {file_path}. Cannot load data.")
+        return [] # Return empty list if file doesn't exist
+
     try:
-        logger.info(f"Loading VSR from {file_path}...")
-        
+        logger.info(f"Loading VSR from local file: {file_path}...")
         with open(file_path, 'r') as f:
             for line in f:
-                stats['total'] += 1
+                stats['lines_read'] += 1
+                
+                # --- THIS IS THE KEY CHANGE ---
+                # Stop only when we have enough GOOD samples, not after N lines.
                 if len(dataset) >= num_samples:
                     break
-                
+
                 try:
                     item = json.loads(line)
-                    
-                    # Skip if not a true spatial relation
-                    if not item.get('label', False):
-                        stats['invalid_label'] += 1
-                        continue
                     
                     # Normalize and map relation
                     raw_relation = item.get('relation', '').lower().strip()
                     relation = ALL_VALID_RELATIONS.get(raw_relation)
                     
+                    # Skip if the relation is not one we are testing
                     if not relation:
-                        stats['invalid_relation'] += 1
-                        logger.debug(f"Skipped relation: {raw_relation}")
+                        stats['skipped_relations'] += 1
                         continue
                     
-                    # Construct proper image URL
+                    # Construct proper image URL from the filename
                     image_filename = item['image']
-                    image_url = f"https://images.cocodataset.org/train2014/COCO_train2014_{image_filename}"
+                    # The VSR dataset uses images from COCO train2014 split
+                    image_url = f"http://images.cocodataset.org/train2014/COCO_train2014_{image_filename}"
                     
                     # Download image
                     try:
-                        response = requests.get(image_url, timeout=10)
+                        response = requests.get(image_url, timeout=15)
                         response.raise_for_status()
-                        image = Image.open(BytesIO(response.content)).convert("RGB")
+                        # Use BytesIO to open the image from memory
+                        image = Image.open(io.BytesIO(response.content)).convert("RGB")
                     except Exception as e:
-                        stats['image_fail'] += 1
-                        logger.debug(f"Image failed: {image_url} - {str(e)}")
+                        stats['image_failures'] += 1
+                        logger.debug(f"Image download failed for {image_url}: {e}")
                         continue
                     
                     dataset.append({
@@ -125,20 +120,17 @@ def load_vsr_dataset(split='test', num_samples=100):
                         "caption": item['caption'],
                         "relation_type": relation
                     })
-                    
-                except Exception as e:
-                    logger.error(f"Error processing item: {str(e)}")
-        
-        logger.info(f"Loaded {len(dataset)}/{stats['total']} samples")
-        logger.info(f"Skipped: {stats['invalid_label']} bad labels, "
-                   f"{stats['invalid_relation']} bad relations, "
-                   f"{stats['image_fail']} image failures")
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Skipping malformed line #{stats['lines_read']}: {e}")
+
+        logger.info(f"Loaded {len(dataset)} valid samples after reading {stats['lines_read']} lines.")
+        logger.info(f"Stats: Skipped Relations={stats['skipped_relations']}, Image Failures={stats['image_failures']}")
         
         return dataset
 
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}")
-        return load_hf_fallback(num_samples)
+        logger.error(f"Critical error during file processing: {e}")
+        return []
 
 def load_hf_fallback(num_samples):
     try:
