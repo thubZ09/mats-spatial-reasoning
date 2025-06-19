@@ -54,49 +54,66 @@ def create_synthetic_image(caption, size=(300, 300)):
 
 def load_vsr_dataset(split='test', num_samples=100):
     """
-    Loads VSR dataset from local JSONL files with real PIL Images
+    Robust VSR dataset loader with detailed logging
     """
-    spatial_kw = ['left', 'right', 'above', 'below', 'front', 'behind']
+    spatial_kw = {'left', 'right', 'above', 'below', 'front', 'behind'}
     dataset = []
+    stats = {
+        'total': 0,
+        'invalid_label': 0,
+        'invalid_relation': 0,
+        'image_fail': 0
+    }
 
-    # Define file path based on split
     file_path = f"{split}.jsonl"
     
-    # Check if file exists
+    # Check file exists and is valid
     if not os.path.exists(file_path):
-        logger.error(f"Dataset file not found: {file_path}")
+        logger.error(f"File not found: {file_path}")
         logger.warning("Falling back to Hugging Face dataset")
         return load_hf_fallback(num_samples)
     
+    if os.path.getsize(file_path) == 0:
+        logger.error(f"Empty file: {file_path}")
+        logger.warning("Falling back to Hugging Face dataset")
+        return load_hf_fallback(num_samples)
+
     try:
-        logger.info(f"Loading VSR dataset from {file_path}...")
+        logger.info(f"Loading VSR from {file_path}...")
         
         with open(file_path, 'r') as f:
             for line in f:
+                stats['total'] += 1
                 if len(dataset) >= num_samples:
                     break
                 
                 try:
                     item = json.loads(line)
                     
-                    # Skip if not a true spatial relation
+                    # Skip false relations (label = False)
                     if not item.get('label', False):
+                        stats['invalid_label'] += 1
                         continue
                     
-                    # Get relation type (normalize to match spatial_kw)
-                    relation = item.get('relation', '').lower()
+                    # Normalize relation
+                    relation = item.get('relation', '').lower().strip()
                     if relation == "in front of":
                         relation = "front"
                     
                     # Skip invalid relations
                     if relation not in spatial_kw:
+                        stats['invalid_relation'] += 1
                         continue
                     
-                    # Download and process image
-                    image_url = item['image']
-                    response = requests.get(image_url, stream=True, timeout=10)
-                    response.raise_for_status()
-                    image = Image.open(response.raw).convert("RGB")
+                    # Download image with timeout
+                    try:
+                        response = requests.get(item['image'], timeout=5)
+                        response.raise_for_status()
+                        image = Image.open(BytesIO(response.content)).convert("RGB")
+                    except Exception as e:
+                        stats['image_fail'] += 1
+                        logger.debug(f"Image failed: {item['image']} - {str(e)}")
+                        continue
                     
                     dataset.append({
                         "image": image,
@@ -104,20 +121,31 @@ def load_vsr_dataset(split='test', num_samples=100):
                         "relation_type": relation
                     })
                     
+                except json.JSONDecodeError:
+                    logger.error(f"JSON decode error on line: {line[:50]}...")
                 except Exception as e:
-                    logger.error(f"Error processing item: {e}")
-                    continue
+                    logger.error(f"Unexpected error: {str(e)}")
 
-        logger.info(f"Loaded {len(dataset)} VSR samples from {split} split")
+        # Log detailed statistics
+        logger.info(f"Processing stats for {file_path}:")
+        logger.info(f" - Total lines: {stats['total']}")
+        logger.info(f" - Valid samples: {len(dataset)}")
+        logger.info(f" - Skipped (invalid label): {stats['invalid_label']}")
+        logger.info(f" - Skipped (invalid relation): {stats['invalid_relation']}")
+        logger.info(f" - Skipped (image failed): {stats['image_fail']}")
+        
+        if not dataset:
+            logger.warning("No valid samples found! Falling back to HF dataset")
+            return load_hf_fallback(num_samples)
+            
         return dataset
 
     except Exception as e:
-        logger.error(f"Local dataset load failed: {e}")
-        logger.warning("Falling back to Hugging Face dataset")
+        logger.error(f"Critical load failure: {str(e)}")
         return load_hf_fallback(num_samples)
 
 def load_hf_fallback(num_samples):
-    """Fallback to Hugging Face dataset if local load fails"""
+    """Fallback to Hugging Face dataset"""
     try:
         logger.warning("Attempting Hugging Face fallback...")
         ds = load_dataset("juletxara/visual-spatial-reasoning", "zeroshot", split="test")
@@ -131,7 +159,7 @@ def load_hf_fallback(num_samples):
                 break
                 
             caption = item["caption"] # type: ignore[index]
-            image = item["image"]     # type: ignore[index]
+            image = item["image"]      # type: ignore[index]
             
             if not caption or image is None:
                 continue
@@ -147,22 +175,18 @@ def load_hf_fallback(num_samples):
                 "relation_type": rel
             })
             
-        logger.info(f"Loaded {len(processed)} samples from Hugging Face fallback")
+        logger.info(f"HF fallback loaded {len(processed)} samples")
         return processed
         
     except Exception as e:
-        logger.error(f"Hugging Face fallback failed: {e}")
+        logger.error(f"HF fallback failed: {e}")
         logger.warning("Using synthetic fallback")
+        # Add synthetic data creator if needed
         return [
             {
-               "image": create_synthetic_image("A red ball is to the left of a blue box"),
-               "caption": "A red ball is to the left of a blue box",
+               "image": Image.new('RGB', (200, 200), color='red'),
+               "caption": "Synthetic: Red ball left of blue box",
                "relation_type": "left"
-            },
-            {
-               "image": create_synthetic_image("A cat is sitting above the mat"),
-               "caption": "A cat is sitting above the mat",
-               "relation_type": "above"
             }
         ]
     
