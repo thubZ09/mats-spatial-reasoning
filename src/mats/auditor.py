@@ -1,498 +1,81 @@
 # src/mats/auditor.py
+
 import torch
 from tqdm import tqdm
-from PIL import Image, ImageDraw
-import io
-import re
-import numpy as np
-import requests
-from io import BytesIO
-from datasets import load_dataset, Image as DatasetsImage
 import logging
-import sys
-import matplotlib.pyplot as plt
-from PIL import Image
-import json
-import os
+from . import perturbations
+from . import metrics
 
-
-# Configure logging
 logger = logging.getLogger(__name__)
 
-def create_synthetic_image(caption, size=(300, 300)):
-    """Create synthetic image with visual representation of caption"""
-    img = Image.new('RGB', size, (255, 255, 255))
-    draw = ImageDraw.Draw(img)
-    
-    # Draw caption
-    try:
-        from PIL import ImageFont
-        font = ImageFont.load_default()
-    except ImportError:
-        font = None
-    
-    draw.text((10, 10), caption, fill=(0, 0, 0), font=font)
-    
-    # Draw objects based on caption
-    if "red ball" in caption and "blue box" in caption:
-        if "left" in caption:
-            draw.ellipse((50, 150, 100, 200), fill='red')  # Left ball
-            draw.rectangle((250, 150, 300, 200), fill='blue')  # Right box
-        else:
-            draw.ellipse((250, 150, 300, 200), fill='red')  # Right ball
-            draw.rectangle((50, 150, 100, 200), fill='blue')  # Left box
-    
-    if "cat" in caption and "mat" in caption:
-        if "above" in caption:
-            draw.ellipse((150, 50, 200, 100), fill='gray')  # Top cat
-            draw.rectangle((125, 200, 225, 250), fill='brown')  # Bottom mat
-        else:
-            draw.ellipse((150, 200, 200, 250), fill='gray')  # Bottom cat
-            draw.rectangle((125, 50, 225, 100), fill='brown')  # Top mat
-    
-    return img
-    
-def load_vsr_dataset(split='test', num_samples=100):
-    """
-    Fixed VSR dataset loader that correctly reads from the local .jsonl file
-    and iterates until enough valid samples are found.
-    """
-    # ... (Your RELATION_MAPPING and ALL_VALID_RELATIONS are perfect, keep them) ...
-    RELATION_MAPPING = {
-        'left': ['left', 'left of', 'on the left of', 'at the left side of'],
-        'right': ['right', 'right of', 'on the right of', 'at the right side of'],
-        'above': ['above', 'over', 'on top of'],
-        'below': ['below', 'under', 'underneath', 'beneath'],
-        'front': ['in front of', 'front', 'ahead of'],
-        'behind': ['behind', 'back', 'in back of', 'at the back of']
-    }
-    ALL_VALID_RELATIONS = {alt: main for main, alts in RELATION_MAPPING.items() for alt in alts}
-
-    dataset = []
-    stats = {'lines_read': 0, 'skipped_relations': 0, 'image_failures': 0}
-    file_path = f"{split}.jsonl"
-
-    if not os.path.exists(file_path):
-        logger.error(f"File not found: {file_path}. Cannot load data.")
-        return [] # Return empty list if file doesn't exist
-
-    try:
-        logger.info(f"Loading VSR from local file: {file_path}...")
-        with open(file_path, 'r') as f:
-            for line in f:
-                stats['lines_read'] += 1
-                
-                # --- THIS IS THE KEY CHANGE ---
-                # Stop only when we have enough GOOD samples, not after N lines.
-                if len(dataset) >= num_samples:
-                    break
-
-                try:
-                    item = json.loads(line)
-                    
-                    # Normalize and map relation
-                    raw_relation = item.get('relation', '').lower().strip()
-                    relation = ALL_VALID_RELATIONS.get(raw_relation)
-                    
-                    # Skip if the relation is not one we are testing
-                    if not relation:
-                        stats['skipped_relations'] += 1
-                        continue
-                    
-                    # Construct proper image URL from the filename
-                    image_filename = item['image']
-                    # The VSR dataset uses images from COCO train2014 split
-                    image_url = f"http://images.cocodataset.org/train2014/COCO_train2014_{image_filename}"
-                    
-                    # Download image
-                    try:
-                        response = requests.get(image_url, timeout=15)
-                        response.raise_for_status()
-                        # Use BytesIO to open the image from memory
-                        image = Image.open(io.BytesIO(response.content)).convert("RGB")
-                    except Exception as e:
-                        stats['image_failures'] += 1
-                        logger.debug(f"Image download failed for {image_url}: {e}")
-                        continue
-                    
-                    dataset.append({
-                        "image": image,
-                        "caption": item['caption'],
-                        "relation_type": relation
-                    })
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"Skipping malformed line #{stats['lines_read']}: {e}")
-
-        logger.info(f"Loaded {len(dataset)} valid samples after reading {stats['lines_read']} lines.")
-        logger.info(f"Stats: Skipped Relations={stats['skipped_relations']}, Image Failures={stats['image_failures']}")
-        
-        return dataset
-
-    except Exception as e:
-        logger.error(f"Critical error during file processing: {e}")
-        return []
-
-def load_hf_fallback(num_samples):
-    try:
-        logger.warning("Attempting Hugging Face fallback...")
-        ds = load_dataset("juletxara/visual-spatial-reasoning", "zeroshot", split="test")
-        ds = ds.cast_column("image", DatasetsImage())
-        
-        processed = []
-        spatial_kw = ['left','right','above','below','front','behind']
-        
-        for item in ds:
-            if len(processed) >= num_samples:
-                break
-                
-            caption = item["caption"]  # type: ignore[index]
-            image = item["image"]      # type: ignore[index]
-            
-            if not caption or image is None:
-                continue
-                
-            # Find spatial keyword
-            rel = next((kw for kw in spatial_kw if kw in caption.lower()), None)
-            if not rel:
-                continue
-                
-            processed.append({
-                "image": image.convert("RGB"),
-                "caption": caption,
-                "relation_type": rel
-            })
-            
-        logger.info(f"HF fallback loaded {len(processed)} samples")
-        return processed
-        
-    except Exception as e:
-        logger.error(f"HF fallback failed: {e}")
-        logger.warning("Using synthetic fallback")
-        # Create simple images without external dependencies
-        return [
-            {
-                "image": Image.new('RGB', (200, 200), color=(255, 0, 0)),  # Red
-                "caption": "Synthetic: Red square",
-                "relation_type": "left"
-            }
-        ]
-    
-def ensure_pil_image(image):
-    if isinstance(image, Image.Image):
-        return image
-    elif isinstance(image, str) and image.startswith('http'):
-        response = requests.get(image)
-        img = Image.open(BytesIO(response.content)).convert("RGB")
-        return img
-    else:
-        # Handle other cases or raise
-        raise ValueError("Unknown image format: {}".format(type(image))) # Last resort
-
-def normalize_response(response):
-    """Convert model response to boolean"""
-    if not response:
-        return None
-        
-    response = response.lower().strip()
-    
-    # Handle various true/false patterns
-    if re.search(r'\b(true|yes|correct|right|affirmative)\b', response):
-        return True
-    if re.search(r'\b(false|no|incorrect|wrong|negative)\b', response):
-        return False
-        
-    # Spatial relation detection
-    if "left" in response and "right" not in response:
-        return True
-    if "right" in response and "left" not in response:
-        return False
-        
-    # Positional indicators
-    if "above" in response and "below" not in response:
-        return True
-    if "below" in response and "above" not in response:
-        return False
-        
-    return None  # Indeterminate
-
-def check_logical_consistency(orig_pred, pert_pred, relation_type):
-    """Enhanced consistency check with relation awareness"""
-    if orig_pred is None or pert_pred is None:
-        return 'INDETERMINATE'
-    
-    # For mutually exclusive relations
-    exclusive_relations = ['left', 'right', 'above', 'below', 
-                           'in front of', 'behind', 'top', 'bottom']
-    
-    if any(rel in relation_type for rel in exclusive_relations):
-        return 'CONSISTENT' if orig_pred != pert_pred else 'INCONSISTENT'
-    
-    # For non-exclusive relations
-    return 'CONSISTENT' if orig_pred == pert_pred else 'INCONSISTENT'
-
-def perturb_spatial_words(sentence):
-    """Perturb spatial relationships in text - FIXED VERSION"""
-    swaps = {
-        r'\bleft\b': 'right',
-        r'\bright\b': 'left',
-        r'\babove\b': 'below',
-        r'\bbelow\b': 'above',
-        r'\btop\b': 'bottom',
-        r'\bbottom\b': 'top',
-        r'\bin front of\b': 'behind',
-        r'\bbehind\b': 'in front of',
-        r'\bfront\b': 'back',
-        r'\bback\b': 'front',
-        r'\bnorth\b': 'south',
-        r'\bsouth\b': 'north',
-        r'\beast\b': 'west',
-        r'\bwest\b': 'east'
-    }
-    
-    # Case-insensitive replacement with word boundaries
-    for orig, repl in swaps.items():
-        sentence = re.sub(orig, repl, sentence, flags=re.IGNORECASE)
-    
-    return sentence
-
-def rotate_image(image, angle=15):
-    """Rotate image while preserving spatial relationships"""
-    try:
-        img = ensure_pil_image(image).convert("RGB")
-        return img.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
-    except Exception as e:
-        logger.error(f"Rotation failed: {e}")
-        return image
-
-def flip_image_horizontally(image):
-    """Flip image left-to-right (changes left/right relationships)"""
-    try:
-        img = ensure_pil_image(image).convert("RGB")
-        return img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-    except Exception as e:
-        logger.error(f"Flip failed: {e}")
-        return image
-
-def get_model_response(model, processor, image, caption):
-    """Get model response with error handling"""
-    try:
-        # Build prompt
-        prompt = (
-            "USER: <image>\nBased strictly on visual spatial relationships, "
-            f"is this true or false? \"{caption}\" "
-            "Answer only with 'True' or 'False'.\nASSISTANT:"
-        )
-        
-        # Process inputs
-        inputs = processor(
-            text=prompt,
-            images=image,
-            return_tensors="pt"
-        ).to(model.device)
-        
-        # Generate response
+def get_raw_prediction(model, processor, image, caption_text, model_type):
+    """Gets a prediction, adapting the prompt and logic for the specified model type."""
+    # This function is now responsible for getting a raw string output from any model.
+    # ... (paste the full get_raw_prediction function from the previous response here) ...
+    # This is the one with the if/elif for "clip", "llava", "blip"
+    prompt = ""
+    if model_type == "clip":
+        inputs = processor(text=[caption_text, "a photo"], images=image, return_tensors="pt", padding=True).to(model.device)
         with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=15,
-                pad_token_id=processor.tokenizer.eos_token_id
-            )
-        
-        # Decode response
-        response = processor.batch_decode(
-            outputs, 
-            skip_special_tokens=True
-        )[0]
-        
-        # Extract assistant response
+            outputs = model(**inputs)
+        return str(outputs.logits_per_image[0][0].item())
+    elif model_type == "llava":
+        prompt = f"USER: <image>\nBased strictly on the visual spatial relationships, is this statement true or false? \"{caption_text}\" Answer only with 'True' or 'False'.\nASSISTANT:"
+    elif model_type == "blip":
+        prompt = f"Question: Based on the image, is the following statement true or false? \"{caption_text}\" Answer:"
+    
+    inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        generate_ids = model.generate(**inputs, max_new_tokens=10)
+    response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    
+    if "ASSISTANT:" in response:
         return response.split("ASSISTANT:")[-1].strip()
-        
-    except Exception as e:
-        logger.error(f"Inference failed: {e}")
-        return "ERROR"
+    return response.strip()
 
-def run_text_perturbation_audit(model, processor, dataset):
-    """
-    Runs a text perturbation audit on a given dataset
-    """
+
+def run_text_perturbation_audit(model, processor, dataset, model_type):
     results = []
-    
-    for item in tqdm(dataset, desc="Text Perturbation Audit"):
+    for item in tqdm(dataset, desc=f"Text Audit ({model_type})"):
         try:
-            # Prepare data
-            image = ensure_pil_image(item['image']).convert("RGB")
-            caption = item['caption']
-            relation_type = item.get('relation_type', 'unknown')
-            
-            # Generate perturbed caption
-            pert_caption = perturb_spatial_words(caption)
-            
-            # Get predictions
-            orig_response = get_model_response(model, processor, image, caption)
-            pert_response = get_model_response(model, processor, image, pert_caption)
-            
-            # Normalize responses
-            orig_norm = normalize_response(orig_response)
-            pert_norm = normalize_response(pert_response)
-            
-            # Check consistency
-            consistency = check_logical_consistency(orig_norm, pert_norm, relation_type)
-            
-            results.append({
-                'caption': caption,
-                'perturbed_caption': pert_caption,
-                'orig_response': orig_response,
-                'pert_response': pert_response,
-                'orig_norm': orig_norm,
-                'pert_norm': pert_norm,
-                'consistency': consistency,
-                'relation_type': relation_type
-            })
-            
+            pert_caption = perturbations.perturb_spatial_words(item['caption'])
+            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
+            raw_pert = get_raw_prediction(model, processor, item['image'], pert_caption, model_type)
+            norm_orig = metrics.normalize_response(raw_orig)
+            norm_pert = metrics.normalize_response(raw_pert)
+            consistency = metrics.check_text_consistency(norm_orig, norm_pert)
+            results.append({'caption': item['caption'], 'perturbed_caption': pert_caption, 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
         except Exception as e:
-            logger.error(f"Text audit failed: {e}")
-            results.append({
-                'error': str(e),
-                'item': item
-            })
-            
+            logger.error(f"Item failed in text audit: {e}")
     return results
 
-def run_visual_perturbation_audit(model, processor, dataset):
-    """
-    Runs visual perturbation audit (rotation)
-    """
+def run_visual_perturbation_audit(model, processor, dataset, model_type):
     results = []
-    
-    for item in tqdm(dataset, desc="Visual Perturbation Audit"):
+    for item in tqdm(dataset, desc=f"Visual Audit ({model_type})"):
         try:
-            # Prepare data
-            image = ensure_pil_image(item['image']).convert("RGB")
-            caption = item['caption']
-            relation_type = item.get('relation_type', 'unknown')
-            
-            # Original prediction
-            orig_response = get_model_response(model, processor, image, caption)
-            orig_norm = normalize_response(orig_response)
-            
-            # Rotated prediction
-            rotated_img = rotate_image(image, 15)
-            rotated_response = get_model_response(model, processor, rotated_img, caption)
-            rotated_norm = normalize_response(rotated_response)
-            
-            # Check consistency
-            if orig_norm is None or rotated_norm is None:
-                consistency = 'INDETERMINATE'
-            elif orig_norm == rotated_norm:
-                consistency = 'CONSISTENT'
-            else:
-                consistency = 'INCONSISTENT'
-                
-            results.append({
-                'caption': caption,
-                'orig_response': orig_response,
-                'rotated_response': rotated_response,
-                'orig_norm': orig_norm,
-                'rotated_norm': rotated_norm,
-                'consistency': consistency,
-                'relation_type': relation_type
-            })
-            
+            pert_image = perturbations.rotate_image(item['image'])
+            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
+            raw_pert = get_raw_prediction(model, processor, pert_image, item['caption'], model_type)
+            norm_orig = metrics.normalize_response(raw_orig)
+            norm_pert = metrics.normalize_response(raw_pert)
+            consistency = metrics.check_visual_consistency(norm_orig, norm_pert)
+            results.append({'caption': item['caption'], 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
         except Exception as e:
-            logger.error(f"Visual audit failed: {e}")
-            results.append({
-                'error': str(e),
-                'item': item
-            })
-            
+            logger.error(f"Item failed in visual audit: {e}")
     return results
 
-def run_coordinated_perturbation_audit(model, processor, dataset):
-    """
-    Runs coordinated visual+text perturbation audit
-    """
+def run_coordinated_perturbation_audit(model, processor, dataset, model_type):
     results = []
-    
-    for item in tqdm(dataset, desc="Coordinated Perturbation Audit"):
+    for item in tqdm(dataset, desc=f"Coordinated Audit ({model_type})"):
         try:
-            # Prepare data
-            image = ensure_pil_image(item['image']).convert("RGB")
-            caption = item['caption']
-            relation_type = item.get('relation_type', 'unknown')
-            
-            # Original prediction
-            orig_response = get_model_response(model, processor, image, caption)
-            orig_norm = normalize_response(orig_response)
-            
-            # Coordinated perturbations
-            flipped_img = flip_image_horizontally(image)
-            pert_caption = perturb_spatial_words(caption)
-            pert_response = get_model_response(model, processor, flipped_img, pert_caption)
-            pert_norm = normalize_response(pert_response)
-            
-            # Check consistency
-            if orig_norm is None or pert_norm is None:
-                consistency = 'INDETERMINATE'
-            elif orig_norm == pert_norm:
-                consistency = 'CONSISTENT'
-            else:
-                consistency = 'INCONSISTENT'
-                
-            results.append({
-                'orig_caption': caption,
-                'pert_caption': pert_caption,
-                'orig_response': orig_response,
-                'pert_response': pert_response,
-                'orig_norm': orig_norm,
-                'pert_norm': pert_norm,
-                'consistency': consistency,
-                'relation_type': relation_type
-            })
-            
+            pert_image = perturbations.flip_image_horizontally(item['image'])
+            pert_caption = perturbations.perturb_spatial_words(item['caption'])
+            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
+            raw_pert = get_raw_prediction(model, processor, pert_image, pert_caption, model_type)
+            norm_orig = metrics.normalize_response(raw_orig)
+            norm_pert = metrics.normalize_response(raw_pert)
+            consistency = metrics.check_coordinated_consistency(norm_orig, norm_pert)
+            results.append({'caption': item['caption'], 'perturbed_caption': pert_caption, 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
         except Exception as e:
-            logger.error(f"Coordinated audit failed: {e}")
-            results.append({
-                'error': str(e),
-                'item': item
-            })
-            
+            logger.error(f"Item failed in coordinated audit: {e}")
     return results
-
-def calculate_scs(results):
-    """
-    Calculate Spatial Consistency Score (SCS)
-    """
-    if not results:
-        return 0.0
-        
-    consistent = sum(1 for r in results if r.get('consistency') == 'CONSISTENT')
-    return consistent / len(results)
-
-def generate_summary_table(results):
-    """
-    Generate summary statistics from audit results
-    """
-    if not results:
-        return {}
-        
-    # Basic counts
-    total = len(results)
-    consistent = sum(1 for r in results if r.get('consistency') == 'CONSISTENT')
-    inconsistent = sum(1 for r in results if r.get('consistency') == 'INCONSISTENT')
-    indeterminate = sum(1 for r in results if r.get('consistency') == 'INDETERMINATE')
-    
-    # Failure mode analysis
-    failure_modes = {}
-    for r in results:
-        if r.get('consistency') == 'INCONSISTENT':
-            rel_type = r.get('relation_type', 'unknown')
-            failure_modes[rel_type] = failure_modes.get(rel_type, 0) + 1
-    
-    return {
-        'total_samples': total,
-        'consistent': consistent,
-        'inconsistent': inconsistent,
-        'indeterminate': indeterminate,
-        'consistency_rate': consistent / total if total > 0 else 0,
-        'failure_modes': failure_modes
-    }

@@ -1,80 +1,51 @@
+# src/mats/perturbations.py
 import re
 from PIL import Image
+import logging
+
+logger = logging.getLogger(__name__)
+
+def ensure_pil_image(image):
+    """A simple utility to ensure the input is a PIL Image."""
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+    raise TypeError(f"Expected a PIL Image, but got {type(image)}")
 
 def perturb_spatial_words(sentence):
-    """
-    Perturbs spatial words in a sentence by swapping them with their opposites.
-    Swaps:
-    - left ↔ right
-    - above ↔ below  
-    - top ↔ bottom
-    - in front of ↔ behind
+    """Perturbs spatial words in a sentence by swapping opposites."""
+    # Use a temporary placeholder to avoid double-swapping (e.g., left -> right -> left)
+    substitutions = [
+        (r'\bleft\b', '__RIGHT__'), (r'\bright\b', '__LEFT__'),
+        (r'\babove\b', '__BELOW__'), (r'\bbelow\b', '__ABOVE__'),
+        (r'\btop\b', '__BOTTOM__'), (r'\bbottom\b', '__TOP__'),
+        (r'\bin front of\b', '__BEHIND__'), (r'\bbehind\b', '__IN_FRONT_OF__'),
+        (r'\bfront\b', '__BACK__'), (r'\bback\b', '__FRONT__')
+    ]
+    for pattern, placeholder in substitutions:
+        sentence = re.sub(pattern, placeholder, sentence, flags=re.IGNORECASE)
     
-    Args:
-        sentence (str): Input sentence containing spatial descriptions
-        
-    Returns:
-        str: Sentence with spatial words swapped
-    """
-    spatial_swaps = {
-        'left': 'right',
-        'right': 'left',
-        'above': 'below',
-        'below': 'above',
-        'top': 'bottom',
-        'bottom': 'top',
-        'in front of': 'behind',
-        'behind': 'in front of'
-    }
-    
-    perturbed_sentence = sentence.lower()
-    
-    # Swap multi-word expressions first
-    for original, replacement in spatial_swaps.items():
-        if len(original.split()) > 1:  
-            pattern = r'\b' + re.escape(original) + r'\b'
-            perturbed_sentence = re.sub(pattern, f"__TEMP_{replacement.replace(' ', '_')}__", 
-                                       perturbed_sentence, flags=re.IGNORECASE)
-    
-    # Then swap single words
-    for original, replacement in spatial_swaps.items():
-        if len(original.split()) == 1:
-            pattern = r'\b' + re.escape(original) + r'\b'
-            perturbed_sentence = re.sub(pattern, f"__TEMP_{replacement}__", 
-                                       perturbed_sentence, flags=re.IGNORECASE)
-    
-    # Replace the temporary tokens with their proper form
-    perturbed_sentence = re.sub(r'__TEMP_([^_]+(?:_[^_]+)*)__', 
-                               lambda m: m.group(1).replace('_', ' '), 
-                               perturbed_sentence)
-    
-    # Attempt to restore capitalization from the original
-    words_original = sentence.split()
-    words_perturbed = perturbed_sentence.split()
-    
-    final_words = []
-    for orig, pert in zip(words_original, words_perturbed):
-        if orig.isupper():
-            final_words.append(pert.upper())
-        elif orig.istitle():
-            final_words.append(pert.capitalize())
-        else:
-            final_words.append(pert)
-    final_words += words_perturbed[len(final_words):]
-    
-    return ' '.join(final_words)
+    # Final replacements
+    sentence = sentence.replace('__RIGHT__', 'right').replace('__LEFT__', 'left')
+    sentence = sentence.replace('__BELOW__', 'below').replace('__ABOVE__', 'above')
+    sentence = sentence.replace('__BOTTOM__', 'bottom').replace('__TOP__', 'top')
+    sentence = sentence.replace('__BEHIND__', 'behind').replace('__IN_FRONT_OF__', 'in front of')
+    sentence = sentence.replace('__BACK__', 'back').replace('__FRONT__', 'front')
+    return sentence
 
-def rotate_image(image: Image.Image, angle: int = 10) -> Image.Image:
-    """
-    Rotates a PIL image by a given angle.
+def rotate_image(image, angle=15):
+    """Rotate image by specified angle."""
+    try:
+        img = ensure_pil_image(image)
+        return img.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
+    except Exception as e:
+        logger.error(f"Rotation failed: {e}")
+        return image
 
-    Args:
-        image (Image.Image): The input image.
-        angle (int): The angle in degrees for rotation.
-                       A positive angle means counter-clockwise rotation.
-
-    Returns:
-        Image.Image: The rotated image.
-    """
-    # Using expand=True ensures the entire rotated image fits in the new image size
-    return image.rotate(angle, expand=True)
+def flip_image_horizontally(image):
+    """Flip image left-to-right."""
+    try:
+        img = ensure_pil_image(image)
+        return img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    except Exception as e:
+        logger.error(f"Flip failed: {e}")
+        return image
