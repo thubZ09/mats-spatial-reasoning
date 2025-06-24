@@ -6,199 +6,192 @@ from PIL import Image
 import io
 import logging
 import zipfile
-from datasets import load_dataset
-from tqdm import tqdm
 import tempfile
+from tqdm import tqdm
+import shutil
+import numpy as np
+from datasets import load_dataset
+
 
 logger = logging.getLogger(__name__)
 
-# Updated Dropbox URL for VSR images with direct download
-VSR_IMAGE_BASE = "https://www.dropbox.com/scl/fi/efvlqxp4zhxfp60m1hujd/vsr_images.zip?rlkey=3w3d8dxbt7xgq64pyh7zosnzm&e=1&st=7ltz5qqh&dl=1"
+# Global cache directory for lazy initialization
+_vsr_cache = {}
 
-def load_vsr_dataset(split='test', num_samples=100, image_base_path=None):
-    """
-    Loads VSR dataset with proper image handling
-    :param split: 'train', 'validation', or 'test'
-    :param num_samples: Number of samples to load
-    :param image_base_path: Local path to downloaded VSR images (optional)
-    """
-    # First try Hugging Face dataset
+def get_vsr_cache_paths():
+    """Returns paths to VSR cache and image directories, creating them if necessary."""
+    if "image_dir" not in _vsr_cache:
+        cache_dir = os.path.join(tempfile.gettempdir(), "vsr_cache")
+        image_dir = os.path.join(cache_dir, "images")
+        os.makedirs(image_dir, exist_ok=True)
+        _vsr_cache["cache_dir"] = cache_dir
+        _vsr_cache["image_dir"] = image_dir
+    return _vsr_cache["cache_dir"], _vsr_cache["image_dir"]
+
+def download_vsr_images():
+    """Download and extract VSR images with progress tracking"""
+    cache_dir, image_dir = get_vsr_cache_paths()
+    
+    # Skip if images already exist
+    if os.path.exists(image_dir) and len(os.listdir(image_dir)) > 1000:
+        logger.info("Using cached VSR images")
+        return image_dir
+    
+    # Download the zip file
+    zip_path = os.path.join(cache_dir, "vsr_images.zip")
+    url = "https://www.dropbox.com/scl/fi/efvlqxp4zhxfp60m1hujd/vsr_images.zip?rlkey=3w3d8dxbt7xgq64pyh7zosnzm&e=1&st=7ltz5qqh&dl=1"
+    
+    logger.info("Downloading VSR images (this may take several minutes)...")
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(zip_path, 'wb') as f, tqdm(
+        desc="Downloading",
+        total=total_size,
+        unit='iB',
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as bar:
+        for data in response.iter_content(chunk_size=1024):
+            size = f.write(data)
+            bar.update(size)
+    
+    # Extract the zip file
+    logger.info("Extracting images...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        for member in tqdm(zip_ref.infolist(), desc="Extracting"):
+            try:
+                zip_ref.extract(member, cache_dir)
+            except zipfile.error as e:
+                logger.warning(f"Skipping invalid file {member.filename}: {e}")
+    
+    # Move images to proper directory
+    extracted_dir = os.path.join(cache_dir, "vsr_images")
+    if os.path.exists(extracted_dir):
+        for file_name in os.listdir(extracted_dir):
+            shutil.move(os.path.join(extracted_dir, file_name), image_dir)
+        shutil.rmtree(extracted_dir)
+    
+    # Verify we have sufficient images
+    if len(os.listdir(image_dir)) < 1000:
+        raise RuntimeError("Insufficient images downloaded")
+    
+    logger.info(f"Downloaded {len(os.listdir(image_dir))} VSR images")
+    return image_dir
+
+def load_vsr_dataset(split='test', num_samples=100):
+    """Main function to load VSR dataset with comprehensive error handling"""
     try:
-        logger.info("Attempting to load from Hugging Face dataset")
-        return load_vsr_from_hf(split, num_samples, image_base_path)
-    except Exception as e:
-        logger.warning(f"Hugging Face load failed: {e}")
-    
-    # Then try GitHub metadata
-    try:
-        logger.info("Falling back to GitHub metadata")
-        return load_vsr_from_github(split, num_samples, image_base_path)
-    except Exception as e:
-        logger.error(f"GitHub load failed: {e}")
-        return create_fallback_dataset(num_samples)
-
-def load_vsr_from_hf(split, num_samples, image_base_path):
-    """Load dataset from Hugging Face with proper image handling"""
-    logger.info(f"Loading VSR {split} split from Hugging Face")
-    dataset = load_dataset("cambridgeltl/vsr_random", split=split)
-    
-    samples = []
-    valid_count = 0
-    
-    for item in tqdm(dataset, desc=f"Processing {split} split"):
-        if valid_count >= num_samples:
-            break
-            
-        # Only use true statements (label=1)
-        if item.get('label', 1) != 1:
-            continue
-            
-        try:
-            image = get_vsr_image(
-                image_id=item['image'],
-                image_base_path=image_base_path
-            )
-            
-            samples.append({
-                "image": image,
-                "caption": item['caption'],
-                "relation_type": item['relation'].lower(),
-                "image_id": item['image']
-            })
-            valid_count += 1
-        except Exception as e:
-            logger.warning(f"Failed to load image {item['image']}: {e}")
-    
-    logger.info(f"Loaded {len(samples)} samples from Hugging Face")
-    return samples
-
-def load_vsr_from_github(split, num_samples, image_base_path):
-    """Fallback to GitHub metadata if Hugging Face fails"""
-    logger.info(f"Loading VSR {split} split from GitHub")
-    json_url = f"https://raw.githubusercontent.com/cambridgeltl/visual-spatial-reasoning/master/data/splits/random/{split}.jsonl"
-    
-    response = requests.get(json_url)
-    response.raise_for_status()
-    lines = response.text.splitlines()
-    
-    samples = []
-    valid_count = 0
-    
-    for line in tqdm(lines, desc=f"Processing {split} split", total=min(num_samples, len(lines))):
-        if valid_count >= num_samples:
-            break
-            
-        try:
-            item = json.loads(line)
-            
-            # Only use true statements (label=1)
-            if item.get('label', 1) != 1:
+        # Download images first
+        image_dir = download_vsr_images()
+        
+        # Load dataset metadata from Hugging Face
+        logger.info(f"Loading VSR metadata for {split} split")
+        dataset = load_dataset("cambridgeltl/vsr_random", split=split)
+        
+        # Filter and process samples
+        samples = []
+        valid_count = 0
+        skipped = 0
+        
+        for item in tqdm(dataset, desc="Processing samples"):
+            if valid_count >= num_samples:
+                break
+                
+            # Only use validated true statements
+            if item.get('label', 0) != 1:
+                skipped += 1
                 continue
                 
-            image = get_vsr_image(
-                image_id=item['image'],
-                image_base_path=image_base_path
-            )
-            
-            samples.append({
-                "image": image,
-                "caption": item['caption'],
-                "relation_type": item['relation'].lower(),
-                "image_id": item['image']
-            })
-            valid_count += 1
-        except Exception as e:
-            logger.warning(f"Failed to process item: {e}")
-    
-    logger.info(f"Loaded {len(samples)} samples from GitHub")
-    return samples
-
-def get_vsr_image(image_id, image_base_path=None):
-    """
-    Load VSR image from local storage or remote sources
-    :param image_id: COCO image ID (e.g., '000000391895.jpg')
-    :param image_base_path: Local directory containing VSR images
-    """
-    # 1. First try local filesystem if path provided
-    if image_base_path:
-        local_path = os.path.join(image_base_path, image_id)
-        if os.path.exists(local_path):
-            return Image.open(local_path).convert("RGB")
-    
-    # 2. Try COCO repositories
-    try:
-        for prefix in ["train2017", "val2017"]:
-            url = f"http://images.cocodataset.org/{prefix}/{image_id}"
-            response = requests.get(url, stream=True, timeout=15)
-            if response.status_code == 200:
-                return Image.open(io.BytesIO(response.content)).convert("RGB")
-    except Exception as e:
-        logger.debug(f"COCO download failed: {e}")
-    
-    # 3. Try Dropbox mirror as last resort
-    try:
-        response = requests.get(VSR_IMAGE_BASE, stream=True, timeout=30)
-        response.raise_for_status()
+            image_path = os.path.join(image_dir, item['image'])
+            if not os.path.exists(image_path):
+                logger.debug(f"Missing image: {item['image']}")
+                skipped += 1
+                continue
+                
+            try:
+                image = Image.open(image_path).convert("RGB")
+                samples.append({
+                    "image": image,
+                    "caption": item['caption'],
+                    "relation_type": item['relation'].lower(),
+                    "image_id": item['image']
+                })
+                valid_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to process {item['image']}: {e}")
+                skipped += 1
         
-        # Save zip to temp file
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-            for chunk in response.iter_content(chunk_size=8192):
-                tmp_file.write(chunk)
-            zip_path = tmp_file.name
+        logger.info(f"Loaded {len(samples)} samples ({skipped} skipped)")
+        return samples
         
-        # Extract specific image from zip
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            with zip_ref.open(f"vsr_images/{image_id}") as file_in_zip:
-                return Image.open(io.BytesIO(file_in_zip.read())).convert("RGB")
     except Exception as e:
-        logger.error(f"Dropbox download failed: {e}")
-        raise ValueError(f"All image sources failed for {image_id}")
+        logger.error(f"Critical error loading dataset: {e}")
+        return create_fallback_dataset(num_samples)
 
 def create_fallback_dataset(num_samples):
-    """Final fallback: Create synthetic data"""
-    logger.error("All data sources failed. Using synthetic data.")
-    return [
-        {
-            "image": create_synthetic_image("A red ball is to the left of a blue box"), 
-            "caption": "A red ball is to the left of a blue box", 
-            "relation_type": "left",
-            "image_id": "synthetic_1"
-        },
-        {
-            "image": create_synthetic_image("A cat is sitting above the mat"), 
-            "caption": "A cat is sitting above the mat", 
-            "relation_type": "above",
-            "image_id": "synthetic_2"
-        }
-    ][:num_samples]
+    """Create synthetic fallback dataset with more samples"""
+    logger.error("Using synthetic fallback dataset")
+    samples = []
+    relations = ['left', 'right', 'above', 'below', 'front', 'behind']
+    
+    for i in range(min(num_samples, 50)):
+        relation = relations[i % len(relations)]
+        caption = f"Sample {i+1}: Object A is {relation} of Object B"
+        samples.append({
+            "image": create_synthetic_image(caption),
+            "caption": caption,
+            "relation_type": relation,
+            "image_id": f"synthetic_{i+1}"
+        })
+    
+    return samples
 
-def create_synthetic_image(caption, size=(300, 300)):
-    """Creates a synthetic image with a visual representation of the caption."""
+def create_synthetic_image(caption, size=(400, 400)):
+    """Create better synthetic images with visual relationships"""
     from PIL import Image, ImageDraw, ImageFont
-    img = Image.new("RGB", size, (255, 255, 255))
+    
+    img = Image.new("RGB", size, (240, 240, 240))
     draw = ImageDraw.Draw(img)
     
-    # Draw caption text
+    # Try to load font
     try:
-        font = ImageFont.load_default()
-        text_position = (10, 10)
-    except ImportError:
+        font = ImageFont.truetype("Arial", 14)
+    except:
         font = None
-        text_position = (10, 10)
     
-    draw.text(text_position, caption, fill=(0, 0, 0), font=font)
+    # Draw caption
+    draw.rectangle([10, 10, size[0]-10, 40], fill=(220, 220, 255))
+    draw.text((20, 15), caption, fill=(0, 0, 0), font=font)
     
-    # Draw spatial relationships if possible
-    if "red ball" in caption and "blue box" in caption:
-        ball_pos = (50, 150) if "left" in caption else (200, 150)
-        box_pos = (200, 150) if "left" in caption else (50, 150)
-        draw.ellipse((ball_pos[0], ball_pos[1], ball_pos[0]+50, ball_pos[1]+50), fill="red")
-        draw.rectangle((box_pos[0], box_pos[1], box_pos[0]+50, box_pos[1]+50), fill="blue")
+    # Draw objects based on relation
+    obj_a_pos, obj_b_pos = (100, 200), (300, 200)
     
-    elif "cat" in caption and "mat" in caption:
-        cat_pos = (150, 50) if "above" in caption else (150, 200)
-        mat_pos = (100, 200) if "above" in caption else (100, 100)
-        draw.ellipse((cat_pos[0], cat_pos[1], cat_pos[0]+40, cat_pos[1]+40), fill="orange")
-        draw.rectangle((mat_pos[0], mat_pos[1], mat_pos[0]+100, mat_pos[1]+30), fill="brown")
+    if 'left' in caption:
+        obj_a_pos, obj_b_pos = (100, 200), (300, 200)
+    elif 'right' in caption:
+        obj_a_pos, obj_b_pos = (300, 200), (100, 200)
+    elif 'above' in caption:
+        obj_a_pos, obj_b_pos = (200, 100), (200, 300)
+    elif 'below' in caption:
+        obj_a_pos, obj_b_pos = (200, 300), (200, 100)
+    elif 'front' in caption:
+        obj_a_pos, obj_b_pos = (200, 200), (250, 200)
+    elif 'behind' in caption:
+        obj_a_pos, obj_b_pos = (250, 200), (200, 200)
+    
+    # Draw objects
+    draw.ellipse(
+        [obj_a_pos[0]-30, obj_a_pos[1]-30, obj_a_pos[0]+30, obj_a_pos[1]+30],
+        fill=(255, 100, 100)
+    )
+    draw.rectangle(
+        [obj_b_pos[0]-30, obj_b_pos[1]-30, obj_b_pos[0]+30, obj_b_pos[1]+30],
+        fill=(100, 100, 255)
+    )
+    
+    # Draw labels
+    draw.text((obj_a_pos[0]-10, obj_a_pos[1]-40), "A", fill=(0, 0, 0), font=font)
+    draw.text((obj_b_pos[0]-10, obj_b_pos[1]-40), "B", fill=(0, 0, 0), font=font)
     
     return img
