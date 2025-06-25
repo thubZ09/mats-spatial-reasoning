@@ -5,32 +5,47 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- This swap dictionary is now more comprehensive ---
+SWAP_DICTIONARY = {
+    # Opposites
+    r'\bleft\b': 'right', r'\bright\b': 'left',
+    r'\babove\b': 'below', r'\bbelow\b': 'above',
+    r'\btop\b': 'bottom', r'\bbottom\b': 'top',
+    r'\bin front of\b': 'behind', r'\bbehind\b': 'in front of',
+    r'\bfront\b': 'back', r'\bback\b': 'front',
+    r'\binside\b': 'outside', r'\boutside\b': 'inside', # <-- ADDED
+    r'\bnear\b': 'far from', r'\bfar from\b': 'near',     # <-- ADDED
+    r'\bclose to\b': 'far from', r'\bfar from\b': 'close to', # <-- ADDED
+    r'\bupper\b': 'lower', r'\blower\b': 'upper',
+    r'\badjacent to\b': 'far from',  r'\bnext to\b': 'away from', 
+    r'\bcloser to\b': 'farther from',
+}
+
 def ensure_pil_image(image):
-    """A simple utility to ensure the input is a PIL Image."""
     if isinstance(image, Image.Image):
         return image.convert("RGB")
     raise TypeError(f"Expected a PIL Image, but got {type(image)}")
 
-def perturb_spatial_words(sentence):
-    """Perturbs spatial words in a sentence by swapping opposites."""
-    # Use a temporary placeholder to avoid double-swapping (e.g., left -> right -> left)
-    substitutions = [
-        (r'\bleft\b', '__RIGHT__'), (r'\bright\b', '__LEFT__'),
-        (r'\babove\b', '__BELOW__'), (r'\bbelow\b', '__ABOVE__'),
-        (r'\btop\b', '__BOTTOM__'), (r'\bbottom\b', '__TOP__'),
-        (r'\bin front of\b', '__BEHIND__'), (r'\bbehind\b', '__IN_FRONT_OF__'),
-        (r'\bfront\b', '__BACK__'), (r'\bback\b', '__FRONT__')
-    ]
-    for pattern, placeholder in substitutions:
-        sentence = re.sub(pattern, placeholder, sentence, flags=re.IGNORECASE)
+def perturb_spatial_words(sentence: str) -> tuple[str, bool]:
+    """
+    Perturbs spatial words and returns the new sentence and a flag
+    indicating if a swap was successfully made.
+    """
+    original_sentence = sentence
     
-    # Final replacements
-    sentence = sentence.replace('__RIGHT__', 'right').replace('__LEFT__', 'left')
-    sentence = sentence.replace('__BELOW__', 'below').replace('__ABOVE__', 'above')
-    sentence = sentence.replace('__BOTTOM__', 'bottom').replace('__TOP__', 'top')
-    sentence = sentence.replace('__BEHIND__', 'behind').replace('__IN_FRONT_OF__', 'in front of')
-    sentence = sentence.replace('__BACK__', 'back').replace('__FRONT__', 'front')
-    return sentence
+    # Use a temporary placeholder strategy to handle complex swaps
+    for pattern, replacement in SWAP_DICTIONARY.items():
+        # Create a temporary unique placeholder for the replacement
+        placeholder = f"__{replacement.upper().replace(' ', '_')}__"
+        sentence = re.sub(pattern, placeholder, sentence, flags=re.IGNORECASE)
+
+    # Now, replace placeholders with final words
+    for _, replacement in SWAP_DICTIONARY.items():
+        placeholder = f"__{replacement.upper().replace(' ', '_')}__"
+        sentence = sentence.replace(placeholder, replacement)
+        
+    was_changed = (original_sentence.lower() != sentence.lower())
+    return sentence, was_changed
 
 def rotate_image(image, angle=15):
     """Rotate image by specified angle."""

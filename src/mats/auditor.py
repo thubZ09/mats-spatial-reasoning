@@ -38,7 +38,10 @@ def run_text_perturbation_audit(model, processor, dataset, model_type):
     results = []
     for item in tqdm(dataset, desc=f"Text Audit ({model_type})"):
         try:
-            pert_caption = perturbations.perturb_spatial_words(item['caption'])
+            pert_caption, was_changed = perturbations.perturb_spatial_words(item['caption'])
+            if not was_changed:
+                logger.debug(f"Skipping sample as no spatial keyword was found: {item['caption']}")
+                continue
             raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
             raw_pert = get_raw_prediction(model, processor, item['image'], pert_caption, model_type)
             norm_orig = metrics.normalize_response(raw_orig)
