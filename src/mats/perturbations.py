@@ -5,20 +5,26 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- This swap dictionary is now more comprehensive ---
 SWAP_DICTIONARY = {
-    # Opposites
     r'\bleft\b': 'right', r'\bright\b': 'left',
     r'\babove\b': 'below', r'\bbelow\b': 'above',
     r'\btop\b': 'bottom', r'\bbottom\b': 'top',
     r'\bin front of\b': 'behind', r'\bbehind\b': 'in front of',
     r'\bfront\b': 'back', r'\bback\b': 'front',
-    r'\binside\b': 'outside', r'\boutside\b': 'inside', # <-- ADDED
-    r'\bnear\b': 'far from', r'\bfar from\b': 'near',     # <-- ADDED
-    r'\bclose to\b': 'far from', r'\bfar from\b': 'close to', # <-- ADDED
+    r'\binside\b': 'outside', r'\boutside\b': 'inside',
+    r'\bnear\b': 'far from', r'\bfar from\b': 'near',
+    r'\bclose to\b': 'far from', r'\bfar from\b': 'close to',
+    r'\bnext to\b': 'away from', r'\badjacent to\b': 'away from',
+    r'\btouching\b': 'separated from', r'\battached to\b': 'detached from',
+    r'\bon\b': 'under', r'\bunder\b': 'over',
     r'\bupper\b': 'lower', r'\blower\b': 'upper',
-    r'\badjacent to\b': 'far from',  r'\bnext to\b': 'away from', 
-    r'\bcloser to\b': 'farther from',
+    r'\bcloser to\b': 'farther from', r'\bfarther from\b': 'closer to',
+    r'\bwithin\b': 'outside', r'\bcontained in\b': 'outside of',
+    r'\bsurrounding\b': 'surrounded by', r'\bsurrounded by\b': 'surrounding',
+    r'\bover\b': 'under', r'\bunderneath\b': 'on top of',
+    r'\bupon\b': 'beneath', r'\bbeside\b': 'away from',
+    r'\bat the left side of\b': 'at the right side of',
+    r'\bat the right side of\b': 'at the left side of',
 }
 
 def ensure_pil_image(image):
@@ -28,23 +34,31 @@ def ensure_pil_image(image):
 
 def perturb_spatial_words(sentence: str) -> tuple[str, bool]:
     """
-    Perturbs spatial words and returns the new sentence and a flag
-    indicating if a swap was successfully made.
+    Perturbs spatial words in a sentence and returns both the modified sentence
+    and a flag indicating if any changes were made.
     """
-    original_sentence = sentence
+    original = sentence
     
-    # Use a temporary placeholder strategy to handle complex swaps
+    # Step 1: Replace all matches with unique placeholders
+    placeholders = {}
     for pattern, replacement in SWAP_DICTIONARY.items():
-        # Create a temporary unique placeholder for the replacement
         placeholder = f"__{replacement.upper().replace(' ', '_')}__"
-        sentence = re.sub(pattern, placeholder, sentence, flags=re.IGNORECASE)
-
-    # Now, replace placeholders with final words
-    for _, replacement in SWAP_DICTIONARY.items():
-        placeholder = f"__{replacement.upper().replace(' ', '_')}__"
+        sentence, count = re.subn(pattern, placeholder, sentence, flags=re.IGNORECASE)
+        if count > 0:
+            placeholders[placeholder] = replacement
+    
+    # Step 2: Replace placeholders with final values
+    for placeholder, replacement in placeholders.items():
         sentence = sentence.replace(placeholder, replacement)
-        
-    was_changed = (original_sentence.lower() != sentence.lower())
+    
+    # Check if any changes were made
+    was_changed = (original.lower() != sentence.lower())
+    
+    if was_changed:
+        logger.debug(f"Perturbed: '{original}' → '{sentence}'")
+    else:
+        logger.warning(f"No spatial terms found in: '{original}'")
+    
     return sentence, was_changed
 
 def rotate_image(image, angle=15):

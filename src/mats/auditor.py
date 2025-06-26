@@ -1,5 +1,4 @@
 # src/mats/auditor.py
-
 import torch
 from tqdm import tqdm
 import logging
@@ -8,46 +7,90 @@ from . import metrics
 
 logger = logging.getLogger(__name__)
 
-def get_raw_prediction(model, processor, image, caption_text, model_type):
-    """Gets a prediction, adapting the prompt and logic for the specified model type."""
-    # This function is now responsible for getting a raw string output from any model.
-    # ... (paste the full get_raw_prediction function from the previous response here) ...
-    # This is the one with the if/elif for "clip", "llava", "blip"
-    prompt = ""
-    if model_type == "clip":
-        inputs = processor(text=[caption_text, "a photo"], images=image, return_tensors="pt", padding=True).to(model.device)
-        with torch.no_grad():
-            outputs = model(**inputs)
-        return str(outputs.logits_per_image[0][0].item())
-    elif model_type == "llava":
-        prompt = f"USER: <image>\nBased strictly on the visual spatial relationships, is this statement true or false? \"{caption_text}\" Answer only with 'True' or 'False'.\nASSISTANT:"
-    elif model_type == "blip":
-        prompt = f"Question: Based on the image, is the following statement true or false? \"{caption_text}\" Answer:"
-    
-    inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        generate_ids = model.generate(**inputs, max_new_tokens=10)
-    response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    
-    if "ASSISTANT:" in response:
-        return response.split("ASSISTANT:")[-1].strip()
-    return response.strip()
+def ensure_pil_image(image):
+    """Compatibility function matching perturbations.py"""
+    return perturbations.ensure_pil_image(image)
 
+def get_raw_prediction(model, processor, image, caption_text, model_type):
+    """
+    Gets a prediction using advanced prompting and generation controls
+    to combat pathological truth bias.
+    """
+    try:
+        image = ensure_pil_image(image).convert("RGB")
+        
+        # Neutral prompt without compliance triggers
+        prompt = (
+            f"Question: Considering the image, is this statement accurate? "
+            f"\"{caption_text}\" Answer only with 'true' or 'false'."
+        )
+
+        # Model-specific formatting
+        if model_type == "llava":
+            prompt = f"USER: <image>\n{prompt}\nASSISTANT:"
+        elif model_type == "blip":
+            prompt = f"Question: {prompt} Answer:"
+        
+        inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
+        
+        # Strict generation parameters
+        with torch.no_grad():
+            generate_ids = model.generate(
+                **inputs,
+                max_new_tokens=5,        # Force short answers
+                temperature=0.01,        # Minimize randomness
+                num_beams=1,             # Disable beam search
+                do_sample=False,          # Greedy decoding
+                pad_token_id=processor.tokenizer.eos_token_id
+            )
+        
+        response = processor.batch_decode(
+            generate_ids, 
+            skip_special_tokens=True, 
+            clean_up_tokenization_spaces=False
+        )[0]
+        
+        # Clean up response
+        if "ASSISTANT:" in response:
+            response = response.split("ASSISTANT:")[-1].strip()
+        elif "Answer:" in response:
+            response = response.split("Answer:")[-1].strip()
+            
+        return response.strip()
+    
+    except Exception as e:
+        logger.error(f"Prediction failed: {e}")
+        return ""
 
 def run_text_perturbation_audit(model, processor, dataset, model_type):
     results = []
     for item in tqdm(dataset, desc=f"Text Audit ({model_type})"):
         try:
+            # Get perturbed caption and change status
             pert_caption, was_changed = perturbations.perturb_spatial_words(item['caption'])
+            
+            # Skip if no spatial terms found
             if not was_changed:
-                logger.debug(f"Skipping sample as no spatial keyword was found: {item['caption']}")
+                logger.debug(f"Skipping: No spatial terms in '{item['caption']}'")
                 continue
+                
+            # Get predictions
             raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
             raw_pert = get_raw_prediction(model, processor, item['image'], pert_caption, model_type)
+            
+            # Normalize and check consistency
             norm_orig = metrics.normalize_response(raw_orig)
             norm_pert = metrics.normalize_response(raw_pert)
             consistency = metrics.check_text_consistency(norm_orig, norm_pert)
-            results.append({'caption': item['caption'], 'perturbed_caption': pert_caption, 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
+            
+            results.append({
+                'caption': item['caption'],
+                'perturbed_caption': pert_caption,
+                'raw_original_pred': raw_orig,
+                'raw_perturbed_pred': raw_pert,
+                'consistency': consistency,
+                'relation_type': item['relation_type']
+            })
         except Exception as e:
             logger.error(f"Item failed in text audit: {e}")
     return results
