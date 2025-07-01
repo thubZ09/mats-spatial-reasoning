@@ -1,127 +1,306 @@
-# src/mats/auditor.py
+# In src/mats/auditor.py
 import torch
-from tqdm import tqdm
 import logging
-from . import perturbations
-from . import metrics
+from tqdm import tqdm
+from typing import Dict, List, Any, Optional, Tuple
+from . import perturbations, metrics
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def ensure_pil_image(image):
-    """Compatibility function matching perturbations.py"""
-    return perturbations.ensure_pil_image(image)
+class AuditorConfig:
+    """Configuration class for auditor parameters."""
+    def __init__(self, 
+                 max_new_tokens: int = 5,
+                 do_sample: bool = False,
+                 batch_size: int = 1,
+                 clear_cache_frequency: int = 100):
+        self.max_new_tokens = max_new_tokens
+        self.do_sample = do_sample
+        self.batch_size = batch_size
+        self.clear_cache_frequency = clear_cache_frequency
 
-def get_raw_prediction(model, processor, image, caption_text, model_type):
+def get_generative_prediction(model, processor, image, caption: str, 
+                            config: Optional[AuditorConfig] = None) -> str:
     """
-    Gets a prediction using advanced prompting and generation controls
-    to combat pathological truth bias.
+    Gets a 'true'/'false' prediction from a generative model like LLaVA.
+    
+    Args:
+        model: The generative model
+        processor: The model processor
+        image: Input image
+        caption: Caption to evaluate
+        config: Configuration object with generation parameters
+    
+    Returns:
+        str: Model response or "ERROR" if prediction fails
     """
+    if config is None:
+        config = AuditorConfig()
+    
     try:
-        image = ensure_pil_image(image).convert("RGB")
+        prompt = f"USER: <image>\nBased on the image, is the following statement true or false? \"{caption}\"\nASSISTANT:"
         
-        # Neutral prompt without compliance triggers
-        prompt = (
-            f"Question: Considering the image, is this statement accurate? "
-            f"\"{caption_text}\" Answer only with 'true' or 'false'."
-        )
-
-        # Model-specific formatting
-        if model_type == "llava":
-            prompt = f"USER: <image>\n{prompt}\nASSISTANT:"
-        elif model_type == "blip":
-            prompt = f"Question: {prompt} Answer:"
+        # Process inputs with error checking
+        inputs = processor(text=prompt, images=image, return_tensors="pt")
+        if hasattr(model, 'device'):
+            inputs = inputs.to(model.device)
         
-        inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-        
-        # Strict generation parameters
         with torch.no_grad():
             generate_ids = model.generate(
-                **inputs,
-                max_new_tokens=5,        # Force short answers
-                temperature=0.01,        # Minimize randomness
-                num_beams=1,             # Disable beam search
-                do_sample=False,          # Greedy decoding
-                pad_token_id=processor.tokenizer.eos_token_id
+                **inputs, 
+                max_new_tokens=config.max_new_tokens, 
+                do_sample=config.do_sample
             )
         
-        response = processor.batch_decode(
-            generate_ids, 
-            skip_special_tokens=True, 
-            clean_up_tokenization_spaces=False
-        )[0]
+        # More robust response parsing
+        decoded_responses = processor.batch_decode(generate_ids, skip_special_tokens=True)
+        if not decoded_responses:
+            logger.warning("No response generated from model")
+            return "ERROR"
         
-        # Clean up response
-        if "ASSISTANT:" in response:
-            response = response.split("ASSISTANT:")[-1].strip()
-        elif "Answer:" in response:
-            response = response.split("Answer:")[-1].strip()
-            
-        return response.strip()
-    
+        full_response = decoded_responses[0]
+        response_parts = full_response.split("ASSISTANT:")
+        
+        if len(response_parts) > 1:
+            response = response_parts[-1].strip()
+        else:
+            # Fallback: use the entire response
+            response = full_response.strip()
+            logger.warning(f"Unexpected response format: {full_response}")
+        
+        return response if response else "EMPTY_RESPONSE"
+        
     except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        return ""
+        logger.error(f"Error in generative prediction: {e}")
+        logger.error(f"Caption: {caption}")
+        return "ERROR"
 
-def run_text_perturbation_audit(model, processor, dataset, model_type):
+def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
+    """
+    Gets a prediction from CLIP. Returns the caption that is MORE likely to be true for the image.
+    
+    Args:
+        model: The contrastive model (e.g., CLIP)
+        processor: The model processor
+        image: Input image
+        caption1: First caption option
+        caption2: Second caption option
+    
+    Returns:
+        str: The caption that better matches the image, or "ERROR" if prediction fails
+    """
+    try:
+        inputs = processor(
+            text=[caption1, caption2], 
+            images=image, 
+            return_tensors="pt", 
+            padding=True
+        )
+        
+        if hasattr(model, 'device'):
+            inputs = inputs.to(model.device)
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        # Validate outputs
+        if not hasattr(outputs, 'logits_per_image'):
+            logger.error("Model outputs missing logits_per_image")
+            return "ERROR"
+        
+        # The output is a vector of similarity scores. We find the index of the highest score.
+        best_match_index = outputs.logits_per_image.argmax().item()
+        selected_caption = caption1 if best_match_index == 0 else caption2
+        
+        logger.debug(f"CLIP selected: '{selected_caption}' (index: {best_match_index})")
+        return selected_caption
+        
+    except Exception as e:
+        logger.error(f"Error in contrastive prediction: {e}")
+        logger.error(f"Captions: '{caption1}' vs '{caption2}'")
+        return "ERROR"
+
+def _clear_gpu_cache_if_needed(step: int, config: AuditorConfig) -> None:
+    """Clear GPU cache periodically to prevent memory issues."""
+    if torch.cuda.is_available() and step % config.clear_cache_frequency == 0:
+        torch.cuda.empty_cache()
+        logger.debug(f"Cleared GPU cache at step {step}")
+
+def _validate_inputs(model, processor, model_type: str, dataset) -> None:
+    """Validate inputs to the audit function."""
+    if model_type not in ['generative', 'contrastive']:
+        raise ValueError(f"Unsupported model_type: '{model_type}'. Must be 'generative' or 'contrastive'")
+    
+    if not dataset:
+        raise ValueError("Dataset cannot be empty")
+    
+    if model is None or processor is None:
+        raise ValueError("Model and processor cannot be None")
+
+def run_comparative_text_audit(model, processor, model_type: str, dataset, 
+                             config: Optional[AuditorConfig] = None) -> List[Dict[str, Any]]:
+    """
+    A unified audit function that intelligently handles both generative and contrastive models.
+    
+    Args:
+        model: The model to audit
+        processor: The model processor
+        model_type: Either 'generative' or 'contrastive'
+        dataset: Dataset containing items with 'image', 'caption', and 'relation_type' keys
+        config: Configuration object with audit parameters
+    
+    Returns:
+        List[Dict]: Results of the audit with consistency information
+    
+    Raises:
+        ValueError: If inputs are invalid
+        Exception: If audit fails completely
+    """
+    # Validate inputs
+    _validate_inputs(model, processor, model_type, dataset)
+    
+    if config is None:
+        config = AuditorConfig()
+    
     results = []
-    for item in tqdm(dataset, desc=f"Text Audit ({model_type})"):
-        try:
-            # Get perturbed caption and change status
-            pert_caption, was_changed = perturbations.perturb_spatial_words(item['caption'])
-            
-            # Skip if no spatial terms found
-            if not was_changed:
-                logger.debug(f"Skipping: No spatial terms in '{item['caption']}'")
-                continue
+    error_count = 0
+    skipped_count = 0
+    
+    logger.info(f"Running Comparative Text Audit for: {model_type.upper()}")
+    logger.info(f"Dataset size: {len(dataset)}")
+    
+    try:
+        for step, item in enumerate(tqdm(dataset, desc=f"Auditing ({model_type})")):
+            try:
+                # Validate item structure
+                required_keys = ['image', 'caption', 'relation_type']
+                missing_keys = [key for key in required_keys if key not in item]
+                if missing_keys:
+                    logger.warning(f"Skipping item {step}: missing keys {missing_keys}")
+                    skipped_count += 1
+                    continue
                 
-            # Get predictions
-            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
-            raw_pert = get_raw_prediction(model, processor, item['image'], pert_caption, model_type)
-            
-            # Normalize and check consistency
-            norm_orig = metrics.normalize_response(raw_orig)
-            norm_pert = metrics.normalize_response(raw_pert)
-            consistency = metrics.check_text_consistency(norm_orig, norm_pert)
-            
-            results.append({
-                'caption': item['caption'],
-                'perturbed_caption': pert_caption,
-                'raw_original_pred': raw_orig,
-                'raw_perturbed_pred': raw_pert,
-                'consistency': consistency,
-                'relation_type': item['relation_type']
-            })
-        except Exception as e:
-            logger.error(f"Item failed in text audit: {e}")
-    return results
+                image = item['image']
+                original_caption = item['caption']
+                relation_type = item['relation_type']
+                
+                # Perturb the caption
+                perturbed_caption, was_changed = perturbations.perturb_spatial_words(original_caption)
+                if not was_changed:
+                    skipped_count += 1
+                    continue  # Skip samples that can't be perturbed
+                
+                if model_type == 'generative':
+                    # --- Logic for LLaVA/BLIP ---
+                    orig_response = get_generative_prediction(model, processor, image, original_caption, config)
+                    pert_response = get_generative_prediction(model, processor, image, perturbed_caption, config)
+                    
+                    # Handle error responses
+                    if orig_response == "ERROR" or pert_response == "ERROR":
+                        error_count += 1
+                        consistency = 'ERROR'
+                    else:
+                        norm_orig = metrics.normalize_response(orig_response)
+                        norm_pert = metrics.normalize_response(pert_response)
+                        consistency = metrics.check_text_consistency(norm_orig, norm_pert)
+                    
+                elif model_type == 'contrastive':
+                    # --- Logic for CLIP ---
+                    # We ask CLIP: which of these two sentences better describes the image?
+                    best_caption = get_contrastive_prediction(model, processor, image, original_caption, perturbed_caption)
+                    
+                    if best_caption == "ERROR":
+                        error_count += 1
+                        consistency = 'ERROR'
+                        orig_response = "ERROR"
+                        pert_response = "ERROR"
+                    else:
+                        # For CLIP, "consistency" means it correctly chose the original, true caption.
+                        consistency = 'CONSISTENT' if best_caption == original_caption else 'INCONSISTENT'
+                        orig_response = "N/A (Contrastive)"
+                        pert_response = f"CLIP chose: '{best_caption}'"
+                
+                results.append({
+                    'item_id': step,
+                    'caption': original_caption,
+                    'perturbed_caption': perturbed_caption,
+                    'orig_response': orig_response,
+                    'pert_response': pert_response,
+                    'consistency': consistency,
+                    'relation_type': relation_type
+                })
+                
+                # Periodic memory cleanup
+                _clear_gpu_cache_if_needed(step, config)
+                
+            except Exception as e:
+                logger.error(f"Error processing item {step}: {e}")
+                error_count += 1
+                continue
+        
+        # Final cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Log summary statistics
+        total_processed = len(results)
+        logger.info(f"Audit completed:")
+        logger.info(f"  - Total items processed: {total_processed}")
+        logger.info(f"  - Items skipped: {skipped_count}")
+        logger.info(f"  - Errors encountered: {error_count}")
+        
+        if total_processed > 0:
+            consistent_count = sum(1 for r in results if r['consistency'] == 'CONSISTENT')
+            consistency_rate = consistent_count / total_processed
+            logger.info(f"  - Consistency rate: {consistency_rate:.2%}")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Fatal error during audit: {e}")
+        raise
 
-def run_visual_perturbation_audit(model, processor, dataset, model_type):
-    results = []
-    for item in tqdm(dataset, desc=f"Visual Audit ({model_type})"):
-        try:
-            pert_image = perturbations.rotate_image(item['image'])
-            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
-            raw_pert = get_raw_prediction(model, processor, pert_image, item['caption'], model_type)
-            norm_orig = metrics.normalize_response(raw_orig)
-            norm_pert = metrics.normalize_response(raw_pert)
-            consistency = metrics.check_visual_consistency(norm_orig, norm_pert)
-            results.append({'caption': item['caption'], 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
-        except Exception as e:
-            logger.error(f"Item failed in visual audit: {e}")
-    return results
-
-def run_coordinated_perturbation_audit(model, processor, dataset, model_type):
-    results = []
-    for item in tqdm(dataset, desc=f"Coordinated Audit ({model_type})"):
-        try:
-            pert_image = perturbations.flip_image_horizontally(item['image'])
-            pert_caption = perturbations.perturb_spatial_words(item['caption'])
-            raw_orig = get_raw_prediction(model, processor, item['image'], item['caption'], model_type)
-            raw_pert = get_raw_prediction(model, processor, pert_image, pert_caption, model_type)
-            norm_orig = metrics.normalize_response(raw_orig)
-            norm_pert = metrics.normalize_response(raw_pert)
-            consistency = metrics.check_coordinated_consistency(norm_orig, norm_pert)
-            results.append({'caption': item['caption'], 'perturbed_caption': pert_caption, 'raw_original_pred': raw_orig, 'raw_perturbed_pred': raw_pert, 'consistency': consistency, 'relation_type': item['relation_type']})
-        except Exception as e:
-            logger.error(f"Item failed in coordinated audit: {e}")
-    return results
+def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Analyze the results of an audit and provide summary statistics.
+    
+    Args:
+        results: List of audit results
+    
+    Returns:
+        Dict containing analysis summary
+    """
+    if not results:
+        return {"error": "No results to analyze"}
+    
+    total = len(results)
+    consistent = sum(1 for r in results if r['consistency'] == 'CONSISTENT')
+    inconsistent = sum(1 for r in results if r['consistency'] == 'INCONSISTENT')
+    errors = sum(1 for r in results if r['consistency'] == 'ERROR')
+    
+    # Analyze by relation type
+    relation_stats = {}
+    for result in results:
+        rel_type = result.get('relation_type', 'unknown')
+        if rel_type not in relation_stats:
+            relation_stats[rel_type] = {'total': 0, 'consistent': 0}
+        relation_stats[rel_type]['total'] += 1
+        if result['consistency'] == 'CONSISTENT':
+            relation_stats[rel_type]['consistent'] += 1
+    
+    # Calculate consistency rates by relation type
+    for rel_type in relation_stats:
+        stats = relation_stats[rel_type]
+        stats['consistency_rate'] = stats['consistent'] / stats['total'] if stats['total'] > 0 else 0
+    
+    return {
+        'total_items': total,
+        'consistent': consistent,
+        'inconsistent': inconsistent,
+        'errors': errors,
+        'overall_consistency_rate': consistent / total if total > 0 else 0,
+        'error_rate': errors / total if total > 0 else 0,
+        'relation_type_analysis': relation_stats
+    }
