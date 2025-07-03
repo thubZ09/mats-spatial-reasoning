@@ -23,26 +23,44 @@ class AuditorConfig:
 def get_generative_prediction(model, processor, image, caption: str):
     """
     Gets a 'true'/'false' prediction from a generative model.
-    This final version manually sets the chat template for Qwen models.
+    Handles Qwen-VL and LLaVA/BLIP style models robustly.
     """
     try:
-        is_qwen_model = "qwen" in getattr(model.config, 'model_type', '').lower()
-
+        # Detect Qwen model by config or class name
+        is_qwen_model = "qwen" in getattr(model.config, 'model_type', '').lower() or "qwen" in model.__class__.__name__.lower()
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
 
         if is_qwen_model:
-            # FIX: Manually set the chat template for the Qwen tokenizer
-            if processor.tokenizer.chat_template is None:
-                processor.tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ 'USER: ' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ 'ASSISTANT: ' + message['content'] + '\n' }}{% endif %}{% endfor %}"
-
             query = f"Based on the image, is this statement true or false? \"{caption}\""
-            conversation = [{'image': image}, {'text': query}]
-            prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-            inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-        else: # Default for LLaVA/BLIP
+            # Qwen expects chat format: [{'role':..., 'content':...}]
+            conversation = [{"role": "user", "content": query}]
+
+            # Check for tokenizer and if it has chat_template
+            tokenizer = getattr(processor, "tokenizer", None)
+            if tokenizer and hasattr(tokenizer, "chat_template") and getattr(tokenizer, "chat_template", None) is None:
+                tokenizer.chat_template = (
+                    "{% for message in messages %}"
+                    "{% if message['role'] == 'user' %}{{ 'USER: ' + message['content'] + '\\n' }}"
+                    "{% elif message['role'] == 'assistant' %}{{ 'ASSISTANT: ' + message['content'] + '\\n' }}"
+                    "{% endif %}{% endfor %}"
+                )
+            # Get chat template method (tokenizer or processor)
+            if tokenizer and hasattr(tokenizer, "apply_chat_template"):
+                prompt = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+            elif hasattr(processor, "apply_chat_template"):
+                prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+            else:
+                raise RuntimeError("No apply_chat_template method found on processor or tokenizer.")
+
+            # Prepare inputs and move to model device
+            inputs = processor(text=prompt, images=image, return_tensors="pt")
+            inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        else:
+            # LLaVA/BLIP and similar models
             prompt = f"USER: <image>\nBased on the image, is the following statement true or false? \"{caption}\"\nASSISTANT:"
-            inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-            if hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
+            inputs = processor(text=prompt, images=image, return_tensors="pt")
+            inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+            if hasattr(processor, "tokenizer") and hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
                 gen_kwargs['pad_token_id'] = processor.tokenizer.pad_token_id
 
         with torch.no_grad():
@@ -50,7 +68,6 @@ def get_generative_prediction(model, processor, image, caption: str):
 
         response = processor.batch_decode(generate_ids, skip_special_tokens=True)[-1]
         return response.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in response else response.strip()
-
     except Exception as e:
         logger.error(f"Error in generative prediction: {e}")
         return "ERROR"
@@ -58,20 +75,25 @@ def get_generative_prediction(model, processor, image, caption: str):
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
     """
     Gets a prediction from a contrastive model.
-    This final version has a more robust check for BiomedCLIP.
+    Handles BiomedCLIP and standard CLIP models robustly.
     """
     try:
-        # FIX: A more robust way to detect BiomedCLIP is by its class name.
-        is_biomed_clip = "BiomedCLIP" in model.__class__.__name__
+        # Detect BiomedCLIP by class name
+        is_biomed_clip = "biomedclip" in model.__class__.__name__.lower()
 
+        # Prepare processor inputs
         if is_biomed_clip:
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt").to(model.device)
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
         else:
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
+
+        # Move all tensors to model.device
+        inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
         with torch.no_grad():
             outputs = model(**inputs)
-        
+
+        # For CLIP-style models, logits_per_image gives similarity scores
         best_match_index = outputs.logits_per_image.argmax().item()
         return caption1 if best_match_index == 0 else caption2
     except Exception as e:
