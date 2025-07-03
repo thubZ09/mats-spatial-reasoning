@@ -79,6 +79,7 @@ def download_vsr_images():
     logger.info(f"Downloaded {len(os.listdir(image_dir))} VSR images")
     return image_dir
 
+
 def load_vsr_dataset(split='test', num_samples=100):
     """Main function to load VSR dataset with comprehensive error handling"""
     try:
