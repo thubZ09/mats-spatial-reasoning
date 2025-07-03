@@ -5,7 +5,6 @@ from tqdm import tqdm
 from typing import Dict, List, Any, Optional, Tuple
 from . import perturbations, metrics
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -24,151 +23,70 @@ class AuditorConfig:
 def get_generative_prediction(model, processor, image, caption):
     """
     Gets a 'true'/'false' prediction from a generative model.
-    Handles different prompt formats for LLaVA and Qwen models.
+    Handles different prompt formats and generation arguments for LLaVA and Qwen models.
     """
-    # More robust model detection
-    model_name = getattr(model.config, 'model_type', '').lower()
-    model_class = model.__class__.__name__.lower()
-    
-    # Check if it's a Qwen model
-    is_qwen_model = (
-        'qwen' in model_name or 
-        'qwen' in model_class or
-        any('qwen' in arch.lower() for arch in getattr(model.config, 'architectures', []))
-    )
-    
-    logger.info(f"Processing with model type: {'Qwen' if is_qwen_model else 'LLaVA'}")
-    
     try:
+        # Robustly detect if the model is a Qwen model
+        is_qwen_model = "qwen" in getattr(model.config, 'model_type', '').lower()
+
+        gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
+
         if is_qwen_model:
-            # Qwen-VL-Chat format
-            # The model expects a specific conversation format
-            query = f"Based on the image, is this statement true or false? Answer with only 'true' or 'false'. Statement: \"{caption}\""
-            
-            # Qwen-VL format with image token
-            prompt = f"<img>{image}</img>{query}"
-            
-            inputs = processor(
-                text=prompt, 
-                images=image, 
-                return_tensors="pt"
-            ).to(model.device)
-            
+            # Qwen uses a specific turn-based format
+            query = f"Based on the image, is this statement true or false? \"{caption}\""
+            conversation = [{'image': image}, {'text': query}]
+            prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+            inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
+            # FIX: Qwen's processor does not need pad_token_id passed to generate
+            # We remove it from the generation arguments for this model.
         else:
             # LLaVA-style prompt
-            prompt = f"USER: <image>\nBased on the image, is the following statement true or false? Answer with only 'true' or 'false'. Statement: \"{caption}\"\nASSISTANT:"
-            
-            inputs = processor(
-                text=prompt, 
-                images=image, 
-                return_tensors="pt"
-            ).to(model.device)
-        
-        # Generate response
+            prompt = f"USER: <image>\nBased on the image, is the following statement true or false? \"{caption}\"\nASSISTANT:"
+            inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
+            # Add pad_token_id for LLaVA if it exists
+            if hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
+                gen_kwargs['pad_token_id'] = processor.tokenizer.pad_token_id
+
         with torch.no_grad():
-            generate_ids = model.generate(
-                **inputs,
-                max_new_tokens=10,  # Increased slightly for safety
-                do_sample=False,
-                temperature=0.1,
-                pad_token_id=processor.tokenizer.pad_token_id if hasattr(processor, 'tokenizer') else None
-            )
+            generate_ids = model.generate(**inputs, **gen_kwargs)
+
+        # Decode and clean the response
+        response = processor.batch_decode(generate_ids, skip_special_tokens=True)[-1]
         
-        # Decode response
-        response = processor.batch_decode(generate_ids, skip_special_tokens=True)[0]
-        
-        # Clean and extract the answer
         if is_qwen_model:
-            # For Qwen, the response might contain the full conversation
-            # Extract just the generated part
-            if query in response:
-                answer = response.split(query)[-1].strip()
-            else:
-                answer = response.strip()
+            return response.strip()
         else:
-            # For LLaVA, extract everything after "ASSISTANT:"
-            if "ASSISTANT:" in response:
-                answer = response.split("ASSISTANT:")[-1].strip()
-            else:
-                answer = response.strip()
-        
-        # Normalize the answer to true/false
-        answer_lower = answer.lower().strip()
-        
-        # Look for true/false indicators
-        if any(word in answer_lower for word in ['true', 'yes', 'correct', 'accurate']):
-            return "true"
-        elif any(word in answer_lower for word in ['false', 'no', 'incorrect', 'inaccurate']):
-            return "false"
-        else:
-            logger.warning(f"Could not parse answer: '{answer}'. Defaulting to 'false'")
-            return "false"
-            
+            return response.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in response else response.strip()
+
     except Exception as e:
         logger.error(f"Error in generative prediction: {str(e)}")
-        return "false"  # Default to false on error
-
-
-def get_generative_prediction_with_confidence(model, processor, image, caption):
-    """
-    Enhanced version that also returns confidence information.
-    """
-    # Get the basic prediction
-    prediction = get_generative_prediction(model, processor, image, caption)
-    
-    # You could extend this to also return logits or other confidence measures
-    # For now, just return the prediction with a simple confidence measure
-    return {
-        'prediction': prediction,
-        'confidence': 0.8 if prediction in ['true', 'false'] else 0.3,
-        'raw_response': prediction  # In case you want to see the raw model output
-    }
+        return "ERROR"
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
     """
     Gets a prediction from CLIP. Returns the caption that is MORE likely to be true for the image.
-    
-    Args:
-        model: The contrastive model (e.g., CLIP)
-        processor: The model processor
-        image: Input image
-        caption1: First caption option
-        caption2: Second caption option
-    
-    Returns:
-        str: The caption that better matches the image, or "ERROR" if prediction fails
     """
     try:
-        inputs = processor(
-            text=[caption1, caption2], 
-            images=image, 
-            return_tensors="pt", 
-            padding=True
-        )
-        
-        if hasattr(model, 'device'):
-            inputs = inputs.to(model.device)
-        
+        # Robustly detect if the model is BiomedCLIP
+        is_biomed_clip = "biomed" in model.config._name_or_path.lower()
+
+        if is_biomed_clip:
+            # FIX: The BiomedCLIP processor does not accept the 'padding' argument.
+            # We call it without padding.
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt").to(model.device)
+        else:
+            # Standard CLIP processors require padding.
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
+
         with torch.no_grad():
             outputs = model(**inputs)
         
-        # Validate outputs
-        if not hasattr(outputs, 'logits_per_image'):
-            logger.error("Model outputs missing logits_per_image")
-            return "ERROR"
-        
-        # The output is a vector of similarity scores. We find the index of the highest score.
         best_match_index = outputs.logits_per_image.argmax().item()
-        selected_caption = caption1 if best_match_index == 0 else caption2
-        
-        logger.debug(f"CLIP selected: '{selected_caption}' (index: {best_match_index})")
-        return selected_caption
-        
+        return caption1 if best_match_index == 0 else caption2
     except Exception as e:
         logger.error(f"Error in contrastive prediction: {e}")
-        logger.error(f"Captions: '{caption1}' vs '{caption2}'")
         return "ERROR"
-
+    
 def _clear_gpu_cache_if_needed(step: int, config: AuditorConfig) -> None:
     """Clear GPU cache periodically to prevent memory issues."""
     if torch.cuda.is_available() and step % config.clear_cache_frequency == 0:
