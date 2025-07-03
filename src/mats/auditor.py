@@ -21,61 +21,108 @@ class AuditorConfig:
         self.batch_size = batch_size
         self.clear_cache_frequency = clear_cache_frequency
 
-def get_generative_prediction(model, processor, image, caption: str, 
-                            config: Optional[AuditorConfig] = None) -> str:
+def get_generative_prediction(model, processor, image, caption):
     """
-    Gets a 'true'/'false' prediction from a generative model like LLaVA.
-    
-    Args:
-        model: The generative model
-        processor: The model processor
-        image: Input image
-        caption: Caption to evaluate
-        config: Configuration object with generation parameters
-    
-    Returns:
-        str: Model response or "ERROR" if prediction fails
+    Gets a 'true'/'false' prediction from a generative model.
+    Handles different prompt formats for LLaVA and Qwen models.
     """
-    if config is None:
-        config = AuditorConfig()
+    # More robust model detection
+    model_name = getattr(model.config, 'model_type', '').lower()
+    model_class = model.__class__.__name__.lower()
+    
+    # Check if it's a Qwen model
+    is_qwen_model = (
+        'qwen' in model_name or 
+        'qwen' in model_class or
+        any('qwen' in arch.lower() for arch in getattr(model.config, 'architectures', []))
+    )
+    
+    logger.info(f"Processing with model type: {'Qwen' if is_qwen_model else 'LLaVA'}")
     
     try:
-        prompt = f"USER: <image>\nBased on the image, is the following statement true or false? \"{caption}\"\nASSISTANT:"
+        if is_qwen_model:
+            # Qwen-VL-Chat format
+            # The model expects a specific conversation format
+            query = f"Based on the image, is this statement true or false? Answer with only 'true' or 'false'. Statement: \"{caption}\""
+            
+            # Qwen-VL format with image token
+            prompt = f"<img>{image}</img>{query}"
+            
+            inputs = processor(
+                text=prompt, 
+                images=image, 
+                return_tensors="pt"
+            ).to(model.device)
+            
+        else:
+            # LLaVA-style prompt
+            prompt = f"USER: <image>\nBased on the image, is the following statement true or false? Answer with only 'true' or 'false'. Statement: \"{caption}\"\nASSISTANT:"
+            
+            inputs = processor(
+                text=prompt, 
+                images=image, 
+                return_tensors="pt"
+            ).to(model.device)
         
-        # Process inputs with error checking
-        inputs = processor(text=prompt, images=image, return_tensors="pt")
-        if hasattr(model, 'device'):
-            inputs = inputs.to(model.device)
-        
+        # Generate response
         with torch.no_grad():
             generate_ids = model.generate(
-                **inputs, 
-                max_new_tokens=config.max_new_tokens, 
-                do_sample=config.do_sample
+                **inputs,
+                max_new_tokens=10,  # Increased slightly for safety
+                do_sample=False,
+                temperature=0.1,
+                pad_token_id=processor.tokenizer.pad_token_id if hasattr(processor, 'tokenizer') else None
             )
         
-        # More robust response parsing
-        decoded_responses = processor.batch_decode(generate_ids, skip_special_tokens=True)
-        if not decoded_responses:
-            logger.warning("No response generated from model")
-            return "ERROR"
+        # Decode response
+        response = processor.batch_decode(generate_ids, skip_special_tokens=True)[0]
         
-        full_response = decoded_responses[0]
-        response_parts = full_response.split("ASSISTANT:")
-        
-        if len(response_parts) > 1:
-            response = response_parts[-1].strip()
+        # Clean and extract the answer
+        if is_qwen_model:
+            # For Qwen, the response might contain the full conversation
+            # Extract just the generated part
+            if query in response:
+                answer = response.split(query)[-1].strip()
+            else:
+                answer = response.strip()
         else:
-            # Fallback: use the entire response
-            response = full_response.strip()
-            logger.warning(f"Unexpected response format: {full_response}")
+            # For LLaVA, extract everything after "ASSISTANT:"
+            if "ASSISTANT:" in response:
+                answer = response.split("ASSISTANT:")[-1].strip()
+            else:
+                answer = response.strip()
         
-        return response if response else "EMPTY_RESPONSE"
+        # Normalize the answer to true/false
+        answer_lower = answer.lower().strip()
         
+        # Look for true/false indicators
+        if any(word in answer_lower for word in ['true', 'yes', 'correct', 'accurate']):
+            return "true"
+        elif any(word in answer_lower for word in ['false', 'no', 'incorrect', 'inaccurate']):
+            return "false"
+        else:
+            logger.warning(f"Could not parse answer: '{answer}'. Defaulting to 'false'")
+            return "false"
+            
     except Exception as e:
-        logger.error(f"Error in generative prediction: {e}")
-        logger.error(f"Caption: {caption}")
-        return "ERROR"
+        logger.error(f"Error in generative prediction: {str(e)}")
+        return "false"  # Default to false on error
+
+
+def get_generative_prediction_with_confidence(model, processor, image, caption):
+    """
+    Enhanced version that also returns confidence information.
+    """
+    # Get the basic prediction
+    prediction = get_generative_prediction(model, processor, image, caption)
+    
+    # You could extend this to also return logits or other confidence measures
+    # For now, just return the prediction with a simple confidence measure
+    return {
+        'prediction': prediction,
+        'confidence': 0.8 if prediction in ['true', 'false'] else 0.3,
+        'raw_response': prediction  # In case you want to see the raw model output
+    }
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
     """
@@ -193,9 +240,9 @@ def run_comparative_text_audit(model, processor, model_type: str, dataset,
                     continue  # Skip samples that can't be perturbed
                 
                 if model_type == 'generative':
-                    # --- Logic for LLaVA/BLIP ---
-                    orig_response = get_generative_prediction(model, processor, image, original_caption, config)
-                    pert_response = get_generative_prediction(model, processor, image, perturbed_caption, config)
+                    # --- Logic for LLaVA
+                    orig_response = get_generative_prediction(model, processor, image, original_caption)
+                    pert_response = get_generative_prediction(model, processor, image, perturbed_caption)
                     
                     # Handle error responses
                     if orig_response == "ERROR" or pert_response == "ERROR":

@@ -35,7 +35,7 @@ if __name__ == "__main__":
             dataset = data_func(num_samples=100) # Use 100 samples for the main run
 
             text_results = auditor.run_text_perturbation_audit(model, processor, dataset, model_type)
-            # visual_results = auditor.run_visual_perturbation_audit(model, processor, dataset, model_type)
+            #visual_results = auditor.run_visual_perturbation_audit(model, processor, dataset, model_type)
             # coordinated_results = auditor.run_coordinated_perturbation_audit(model, processor, dataset, model_type)
 
             output_path = f"results/{model_name}_{dataset_name}_results.json"
