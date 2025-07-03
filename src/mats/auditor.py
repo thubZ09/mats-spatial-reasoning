@@ -20,62 +20,53 @@ class AuditorConfig:
         self.batch_size = batch_size
         self.clear_cache_frequency = clear_cache_frequency
 
-def get_generative_prediction(model, processor, image, caption):
+def get_generative_prediction(model, processor, image, caption: str):
     """
     Gets a 'true'/'false' prediction from a generative model.
-    Handles different prompt formats and generation arguments for LLaVA and Qwen models.
+    This final version manually sets the chat template for Qwen models.
     """
     try:
-        # Robustly detect if the model is a Qwen model
         is_qwen_model = "qwen" in getattr(model.config, 'model_type', '').lower()
 
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
 
         if is_qwen_model:
-            # Qwen uses a specific turn-based format
+            # FIX: Manually set the chat template for the Qwen tokenizer
+            if processor.tokenizer.chat_template is None:
+                processor.tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ 'USER: ' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ 'ASSISTANT: ' + message['content'] + '\n' }}{% endif %}{% endfor %}"
+
             query = f"Based on the image, is this statement true or false? \"{caption}\""
             conversation = [{'image': image}, {'text': query}]
             prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-            # FIX: Qwen's processor does not need pad_token_id passed to generate
-            # We remove it from the generation arguments for this model.
-        else:
-            # LLaVA-style prompt
+        else: # Default for LLaVA/BLIP
             prompt = f"USER: <image>\nBased on the image, is the following statement true or false? \"{caption}\"\nASSISTANT:"
             inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
-            # Add pad_token_id for LLaVA if it exists
             if hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
                 gen_kwargs['pad_token_id'] = processor.tokenizer.pad_token_id
 
         with torch.no_grad():
             generate_ids = model.generate(**inputs, **gen_kwargs)
 
-        # Decode and clean the response
         response = processor.batch_decode(generate_ids, skip_special_tokens=True)[-1]
-        
-        if is_qwen_model:
-            return response.strip()
-        else:
-            return response.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in response else response.strip()
+        return response.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in response else response.strip()
 
     except Exception as e:
-        logger.error(f"Error in generative prediction: {str(e)}")
+        logger.error(f"Error in generative prediction: {e}")
         return "ERROR"
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
     """
-    Gets a prediction from CLIP. Returns the caption that is MORE likely to be true for the image.
+    Gets a prediction from a contrastive model.
+    This final version has a more robust check for BiomedCLIP.
     """
     try:
-        # Robustly detect if the model is BiomedCLIP
-        is_biomed_clip = "biomed" in model.config._name_or_path.lower()
+        # FIX: A more robust way to detect BiomedCLIP is by its class name.
+        is_biomed_clip = "BiomedCLIP" in model.__class__.__name__
 
         if is_biomed_clip:
-            # FIX: The BiomedCLIP processor does not accept the 'padding' argument.
-            # We call it without padding.
             inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt").to(model.device)
         else:
-            # Standard CLIP processors require padding.
             inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
 
         with torch.no_grad():
