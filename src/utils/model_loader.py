@@ -91,59 +91,134 @@ def load_qwen_vl_chat():
         raise e
 
 def load_biomed_clip():
-    """Loads the Microsoft BiomedCLIP model with proper processor handling."""
+    """
+    Loads the Microsoft BiomedCLIP model using OpenCLIP.
+    This model requires open_clip_torch package.
+    """
     logger.info("Loading BiomedCLIP...")
     
     try:
-        model_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-        
-        # Try loading the model first
-        model = CLIPModel.from_pretrained(model_id, device_map="auto")
-        
-        # For BiomedCLIP, we need to use the base CLIP processor
-        # since it doesn't have its own preprocessor_config.json
+        # Install open_clip_torch if not available
         try:
-            processor = CLIPProcessor.from_pretrained(model_id)
-        except Exception as e:
-            logger.warning(f"Failed to load processor from model_id: {e}")
-            logger.info("Using base CLIP processor instead...")
-            
-            # Fallback to base CLIP processor
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
-            
+            import open_clip
+        except ImportError:
+            import subprocess
+            import sys
+            logger.info("Installing open_clip_torch...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "open_clip_torch"])
+            import open_clip
+        
+        # Load the model using OpenCLIP
+        model, preprocess = open_clip.create_model_from_pretrained(
+            'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+        )
+        tokenizer = open_clip.get_tokenizer(
+            'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+        )
+        
+        # Create a wrapper to make it compatible with your existing code
+        class BiomedCLIPWrapper:
+            def __init__(self, model, tokenizer, preprocess):
+                self.model = model
+                self.tokenizer = tokenizer
+                self.preprocess = preprocess
+                self.device = next(model.parameters()).device
+                
+            def to(self, device):
+                self.model = self.model.to(device)
+                self.device = device
+                return self
+                
+            def eval(self):
+                self.model.eval()
+                return self
+                
+            def __call__(self, images, texts):
+                # This mimics the OpenCLIP interface
+                with torch.no_grad():
+                    image_features, text_features, logit_scale = self.model(images, texts)
+                    return image_features, text_features, logit_scale
+        
+        class BiomedCLIPProcessor:
+            def __init__(self, tokenizer, preprocess):
+                self.tokenizer = tokenizer
+                self.preprocess = preprocess
+                self.context_length = 256
+                
+            def __call__(self, text=None, images=None, return_tensors="pt"):
+                results = {}
+                
+                if text is not None:
+                    # Handle text input
+                    if isinstance(text, str):
+                        text = [text]
+                    tokens = self.tokenizer(text, context_length=self.context_length)
+                    results['input_ids'] = tokens
+                    
+                if images is not None:
+                    # Handle image input
+                    if not isinstance(images, list):
+                        images = [images]
+                    
+                    processed_images = []
+                    for img in images:
+                        if hasattr(img, 'convert'):  # PIL Image
+                            processed_img = self.preprocess(img)
+                        else:  # Already a tensor
+                            processed_img = img
+                        processed_images.append(processed_img)
+                    
+                    if len(processed_images) == 1:
+                        results['pixel_values'] = processed_images[0].unsqueeze(0)
+                    else:
+                        results['pixel_values'] = torch.stack(processed_images)
+                
+                return results
+        
+        # Wrap the model and processor
+        wrapped_model = BiomedCLIPWrapper(model, tokenizer, preprocess)
+        wrapped_processor = BiomedCLIPProcessor(tokenizer, preprocess)
+        
+        # Move to GPU if available
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        wrapped_model.to(device)
+        wrapped_model.eval()
+        
         logger.info("BiomedCLIP loaded successfully.")
-        return model, processor, "contrastive"
+        return wrapped_model, wrapped_processor, "contrastive"
         
     except Exception as e:
         logger.error(f"Failed to load BiomedCLIP: {str(e)}")
         raise e
 
+# Alternative: Use a different biomedical model that works with transformers
 def load_biomed_clip_alternative():
-    """Alternative BiomedCLIP loader using manual processor configuration."""
-    logger.info("Loading BiomedCLIP (alternative method)...")
+    """
+    Alternative: Load a different biomedical vision model that works with transformers.
+    """
+    logger.info("Loading alternative biomedical vision model...")
     
     try:
-        model_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+        # Try using a different model that might work better
+        model_id = "flaviagiammarino/pubmed-clip-vit-base-patch32"
         
-        # Load the model
-        model = CLIPModel.from_pretrained(model_id, device_map="auto")
-        
-        # Create processor manually with compatible configuration
-        from transformers import CLIPTokenizer, CLIPImageProcessor
-        
-        # Use compatible tokenizer and image processor
-        tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch16")
-        image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch16")
-        
-        # Combine them into a processor
-        processor = CLIPProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer
-        )
-        
-        logger.info("BiomedCLIP loaded successfully with manual processor.")
-        return model, processor, "contrastive"
-        
+        try:
+            processor = CLIPProcessor.from_pretrained(model_id)
+            model = CLIPModel.from_pretrained(model_id, device_map="auto")
+            
+            logger.info("Alternative biomedical CLIP model loaded successfully.")
+            return model, processor, "contrastive"
+            
+        except Exception:
+            # If that doesn't work, fall back to regular CLIP
+            logger.warning("Alternative biomedical model failed, using regular CLIP...")
+            model_id = "openai/clip-vit-base-patch32"
+            processor = CLIPProcessor.from_pretrained(model_id)
+            model = CLIPModel.from_pretrained(model_id, device_map="auto")
+            
+            logger.info("Regular CLIP loaded as fallback.")
+            return model, processor, "contrastive"
+            
     except Exception as e:
-        logger.error(f"Failed to load BiomedCLIP (alternative): {str(e)}")
+        logger.error(f"Failed to load alternative model: {str(e)}")
         raise e

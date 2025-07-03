@@ -1,1 +1,2 @@
  transformers_stream_generator
+ open_clip_torch
