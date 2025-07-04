@@ -76,23 +76,20 @@ def get_contrastive_prediction(model, processor, image, caption1, caption2):
     try:
         is_biomed_clip = "biomedclip" in model.__class__.__name__.lower()
 
-        inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True, truncation=True)
-        inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
-
         if is_biomed_clip:
-            # For BiomedCLIP, call directly with images and texts
+            # Only pass supported args
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
+            inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = model(images=image, texts=[caption1, caption2])
-                best_match_index = outputs.logits_per_image.argmax().item()
-                return caption1 if best_match_index == 0 else caption2
         else:
-            # For other contrastive models (CLIP, etc)
             inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True, truncation=True)
             inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = model(**inputs)
-                best_match_index = outputs.logits_per_image.argmax().item()
-                return caption1 if best_match_index == 0 else caption2
+
+        best_match_index = outputs.logits_per_image.argmax().item()
+        return caption1 if best_match_index == 0 else caption2
     except Exception as e:
         logger.error(f"Error in contrastive prediction: {e}")
         return "ERROR"
