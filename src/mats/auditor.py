@@ -1,6 +1,8 @@
 # In src/mats/auditor.py
 import torch
 import logging
+from PIL import Image
+import numpy as np
 from tqdm import tqdm
 from typing import Dict, List, Any, Optional, Tuple
 from . import perturbations, metrics
@@ -77,25 +79,32 @@ def get_contrastive_prediction(model, processor, image, caption1, caption2):
         is_biomed_clip = "biomedclip" in model.__class__.__name__.lower()
 
         if is_biomed_clip:
-            # Only pass supported args
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
-            inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+            # Convert PIL.Image to numpy array if necessary
+            if isinstance(image, Image.Image):
+                image = np.array(image)
             with torch.no_grad():
                 outputs = model(images=image, texts=[caption1, caption2])
+                best_match_index = outputs.logits_per_image.argmax().item()
+                return caption1 if best_match_index == 0 else caption2
         else:
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True, truncation=True)
+            inputs = processor(
+                text=[caption1, caption2],
+                images=image,
+                return_tensors="pt",
+                padding=True,
+                truncation=True
+            )
             inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = model(**inputs)
-
-        best_match_index = outputs.logits_per_image.argmax().item()
-        return caption1 if best_match_index == 0 else caption2
+                best_match_index = outputs.logits_per_image.argmax().item()
+                return caption1 if best_match_index == 0 else caption2
     except Exception as e:
         logger.error(f"Error in contrastive prediction: {e}")
         return "ERROR"
     
 def _clear_gpu_cache_if_needed(step: int, config: AuditorConfig) -> None:
-    """Clear GPU cache periodically to prevent memory issues."""
+    """clear GPU cache periodically to prevent memory issues."""
     if torch.cuda.is_available() and step % config.clear_cache_frequency == 0:
         torch.cuda.empty_cache()
         logger.debug(f"Cleared GPU cache at step {step}")
