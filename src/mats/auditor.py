@@ -72,28 +72,20 @@ def get_generative_prediction(model, processor, image, caption: str):
         logger.error(f"Error in generative prediction: {e}")
         return "ERROR"
 
-def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str) -> str:
-    """
-    Gets a prediction from a contrastive model.
-    Handles BiomedCLIP and standard CLIP models robustly.
-    """
+def get_contrastive_prediction(model, processor, image, caption1, caption2):
     try:
-        # Detect BiomedCLIP by class name
         is_biomed_clip = "biomedclip" in model.__class__.__name__.lower()
 
-        # Prepare processor inputs
-        if is_biomed_clip:
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
-        else:
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
-
-        # Move all tensors to model.device
+        inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
         inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
+        if is_biomed_clip:
+            # Only keep keys your model actually accepts
+            allowed_keys = model.__call__.__code__.co_varnames
+            inputs = {k: v for k, v in inputs.items() if k in allowed_keys}
 
         with torch.no_grad():
             outputs = model(**inputs)
-
-        # For CLIP-style models, logits_per_image gives similarity scores
         best_match_index = outputs.logits_per_image.argmax().item()
         return caption1 if best_match_index == 0 else caption2
     except Exception as e:
