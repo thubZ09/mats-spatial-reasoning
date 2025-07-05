@@ -2,6 +2,7 @@
 import re
 from PIL import Image
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +79,42 @@ def flip_image_horizontally(image):
     except Exception as e:
         logger.error(f"Flip failed: {e}")
         return image
+
+def generate_cognitive_map(caption: str) -> str:
+    """
+    Creates a simple, rule-based cognitive map from a VSR caption.
+    This map represents a "perfect understanding" of the caption's statement.
+    Example: "The cat is to the left of the dog." -> places cat at x=4, dog at x=6.
+    """
+    try:
+        # A simple parser for "The [obj1] is [relation] the [obj2]."
+        parts = caption.replace('.', '').lower().split()
+        if len(parts) < 5: return None
+
+        obj1 = parts[1]
+        obj2 = parts[-1]
+        relation = " ".join(parts[2:-1])
+
+        map_data = {"objects": []}
+        # Define positions based on the relation
+        if "left" in relation:
+            map_data["objects"].append({"name": obj1, "position": {"x": 0.25, "y": 0.5}})
+            map_data["objects"].append({"name": obj2, "position": {"x": 0.75, "y": 0.5}})
+        elif "right" in relation:
+            map_data["objects"].append({"name": obj1, "position": {"x": 0.75, "y": 0.5}})
+            map_data["objects"].append({"name": obj2, "position": {"x": 0.25, "y": 0.5}})
+        elif "above" in relation or "on" in relation:
+            map_data["objects"].append({"name": obj1, "position": {"x": 0.5, "y": 0.25}})
+            map_data["objects"].append({"name": obj2, "position": {"x": 0.5, "y": 0.75}})
+        elif "below" in relation or "under" in relation:
+            map_data["objects"].append({"name": obj1, "position": {"x": 0.5, "y": 0.75}})
+            map_data["objects"].append({"name": obj2, "position": {"x": 0.5, "y": 0.25}})
+        else:
+            # For other relations, just place them apart as a default
+            map_data["objects"].append({"name": obj1, "position": {"x": 0.25, "y": 0.5}})
+            map_data["objects"].append({"name": obj2, "position": {"x": 0.75, "y": 0.5}})
+
+        return json.dumps(map_data, indent=2)
+    except Exception:
+        # If the caption format is unexpected, we can't create a map.
+        return None
