@@ -129,10 +129,10 @@ def run_comparative_text_audit(model, processor, model_type: str, dataset, confi
         if not was_changed:
             continue
 
-        cognitive_map = perturbations.generate_cognitive_map(original_caption) if use_maps else None
+        cognitive_map = item.get("cognitive_map") if use_maps else None
         
         if model_type == 'generative':
-            orig_resp = get_generative_prediction(model, processor, item['image'], original_caption, cognitive_map)
+            orig_resp = get_generative_prediction(model, processor, item['image'], item['caption'], cognitive_map)
             pert_resp = get_generative_prediction(model, processor, item['image'], perturbed_caption, cognitive_map)
             
             norm_orig = metrics.normalize_response(orig_resp)
