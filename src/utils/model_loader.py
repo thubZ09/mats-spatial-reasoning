@@ -6,7 +6,8 @@ from transformers import (
     AutoProcessor, LlavaForConditionalGeneration, BitsAndBytesConfig,
     Blip2Processor, Blip2ForConditionalGeneration,
     InstructBlipProcessor, InstructBlipForConditionalGeneration,
-    CLIPProcessor, CLIPModel, AutoModelForCausalLM
+    CLIPProcessor, CLIPModel, AutoModelForCausalLM, AutoTokenizer,
+    SiglipProcessor, SiglipModel
 )
 import torch
 import logging
@@ -31,6 +32,151 @@ def load_clip_vit_b_32():
     model = CLIPModel.from_pretrained(model_id, device_map="auto")
     logger.info("CLIP-ViT-B/32 loaded successfully.")
     return model, processor, "contrastive"
+
+def load_siglip_base():
+    """
+    Loads the SigLIP base model - a better CLIP with sigmoid loss.
+    SigLIP performs better at smaller batch sizes and is more memory efficient.
+    """
+    logger.info("Loading SigLIP-Base-Patch16-224...")
+    
+    try:
+        model_id = "google/siglip-base-patch16-224"
+        
+        # Try with quantization for memory efficiency
+        try:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4"
+            )
+            
+            processor = SiglipProcessor.from_pretrained(model_id)
+            model = SiglipModel.from_pretrained(
+                model_id,
+                quantization_config=quantization_config,
+                device_map="auto"
+            )
+            
+        except Exception as e:
+            logger.warning(f"Quantized SigLIP loading failed: {e}. Trying without quantization...")
+            
+            # Fallback without quantization
+            processor = SiglipProcessor.from_pretrained(model_id)
+            model = SiglipModel.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
+        
+        logger.info("SigLIP-Base-Patch16-224 loaded successfully.")
+        return model, processor, "contrastive"
+        
+    except Exception as e:
+        logger.error(f"Failed to load SigLIP: {str(e)}")
+        raise e
+
+def load_siglip2_base():
+    """
+    Loads the SigLIP2 base model - improved multilingual version.
+    """
+    logger.info("Loading SigLIP2-Base-Patch16-224...")
+    
+    try:
+        model_id = "google/siglip2-base-patch16-224"
+        
+        # Try with quantization for memory efficiency
+        try:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4"
+            )
+            
+            processor = SiglipProcessor.from_pretrained(model_id)
+            model = SiglipModel.from_pretrained(
+                model_id,
+                quantization_config=quantization_config,
+                device_map="auto"
+            )
+            
+        except Exception as e:
+            logger.warning(f"Quantized SigLIP2 loading failed: {e}. Trying without quantization...")
+            
+            # Fallback without quantization
+            processor = SiglipProcessor.from_pretrained(model_id)
+            model = SiglipModel.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                device_map="auto"
+            )
+        
+        logger.info("SigLIP2-Base-Patch16-224 loaded successfully.")
+        return model, processor, "contrastive"
+        
+    except Exception as e:
+        logger.error(f"Failed to load SigLIP2: {str(e)}")
+        raise e
+
+def load_moondream2():
+    """
+    Loads the Moondream2 model - a tiny vision language model designed for edge devices.
+    This model is very efficient and should work well on Colab free tier.
+    """
+    logger.info("Loading Moondream2...")
+    
+    try:
+        model_id = "vikhyatk/moondream2"
+        
+        # Try with quantization first for memory efficiency
+        try:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4"
+            )
+            
+            # Load tokenizer and model
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                revision="2025-01-09",  # Use latest revision
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            
+        except Exception as e:
+            logger.warning(f"Quantized Moondream2 loading failed: {e}. Trying without quantization...")
+            
+            # Fallback without quantization
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                revision="2025-01-09",
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True
+            )
+        
+        # Create a simple processor wrapper for consistency
+        class MoondreamProcessor:
+            def __init__(self, tokenizer):
+                self.tokenizer = tokenizer
+                
+            def __call__(self, text=None, images=None, return_tensors="pt"):
+                if text is not None:
+                    return self.tokenizer(text, return_tensors=return_tensors)
+                return {}
+        
+        processor = MoondreamProcessor(tokenizer)
+        
+        logger.info("Moondream2 loaded successfully.")
+        return model, processor, "generative"
+        
+    except Exception as e:
+        logger.error(f"Failed to load Moondream2: {str(e)}")
+        raise e
 
 def load_qwen_vl_chat():
     """Loads the Qwen-VL-Chat model with proper disk offloading."""
@@ -222,3 +368,57 @@ def load_biomed_clip_alternative():
     except Exception as e:
         logger.error(f"Failed to load alternative model: {str(e)}")
         raise e
+
+# Utility function to get available models
+def get_available_models():
+    """Returns a dictionary of available models and their load functions."""
+    return {
+        'llava-1.5-7b': load_llava_1_5_7b,
+        'clip-vit-b-32': load_clip_vit_b_32,
+        'siglip-base': load_siglip_base,
+        'siglip2-base': load_siglip2_base,
+        'moondream2': load_moondream2,
+        'qwen-vl-chat': load_qwen_vl_chat,
+        'biomed-clip': load_biomed_clip,
+        'biomed-clip-alt': load_biomed_clip_alternative
+    }
+
+# Memory usage estimation (approximate)
+def get_model_memory_requirements():
+    """Returns approximate memory requirements for each model in GB."""
+    return {
+        'llava-1.5-7b': {'fp16': 14, '4bit': 4.5},
+        'clip-vit-b-32': {'fp16': 1.2, '4bit': 0.6},
+        'siglip-base': {'fp16': 1.2, '4bit': 0.6},
+        'siglip2-base': {'fp16': 1.2, '4bit': 0.6},
+        'moondream2': {'fp16': 3.5, '4bit': 1.8},
+        'qwen-vl-chat': {'fp16': 8, '4bit': 4},
+        'biomed-clip': {'fp16': 1.5, '4bit': 0.8},
+        'biomed-clip-alt': {'fp16': 1.2, '4bit': 0.6}
+    }
+
+def can_load_together_on_colab_free(model_names, use_quantization=True):
+    """
+    Estimates if the given models can be loaded together on Colab free tier.
+    Assumes ~12-13GB available GPU memory on T4.
+    """
+    memory_reqs = get_model_memory_requirements()
+    total_memory = 0
+    quantization_key = '4bit' if use_quantization else 'fp16'
+    
+    for model_name in model_names:
+        if model_name in memory_reqs:
+            total_memory += memory_reqs[model_name][quantization_key]
+        else:
+            logger.warning(f"Unknown model: {model_name}")
+            return False
+    
+    # Conservative estimate: 12GB available on Colab free tier
+    colab_free_memory = 12.0
+    can_fit = total_memory <= colab_free_memory
+    
+    logger.info(f"Estimated memory usage: {total_memory:.1f}GB")
+    logger.info(f"Available memory: {colab_free_memory}GB")
+    logger.info(f"Can fit on Colab free tier: {can_fit}")
+    
+    return can_fit, total_memory, colab_free_memory
