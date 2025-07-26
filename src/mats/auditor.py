@@ -107,25 +107,43 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
     try:
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
         
-        if model_family == 'qwen':
+        if model_family == 'moondream':
+            # Moondream2 uses its own special interface - FIXED
+            try:
+                # Moondream2 requires: answer_question(image_embeds, prompt, tokenizer)
+                if hasattr(model, 'answer_question') and hasattr(model, 'encode_image'):
+                    # Encode the image first
+                    image_embeds = model.encode_image(image)
+                    # Use the answer_question method with correct arguments
+                    response = model.answer_question(image_embeds, prompt_text, processor.tokenizer)
+                    return clean_moondream_response(response)
+                else:
+                    logger.warning("Moondream2 methods not found, trying alternative approach")
+                    # Alternative: try with processor
+                    inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
+                    with torch.no_grad():
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
+                    return clean_moondream_response(response)
+                    
+            except Exception as e:
+                logger.error(f"Moondream2 native interface failed: {e}")
+                # Final fallback - try basic processor approach
+                try:
+                    inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
+                    with torch.no_grad():
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
+                    return clean_moondream_response(response)
+                except Exception as final_e:
+                    logger.error(f"All Moondream2 approaches failed: {final_e}")
+                    return "ERROR"
+        
+        elif model_family == 'qwen':
             # Qwen-specific formatting
             conversation = [{'image': image}, {'text': prompt_text}]
             full_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
-            
-        elif model_family == 'moondream':
-            # Moondream2 uses its own encoding method
-            try:
-                # Try the Moondream2 native interface first
-                if hasattr(model, 'answer_question'):
-                    response = model.answer_question(model.encode_image(image), prompt_text, processor.tokenizer)
-                    return clean_moondream_response(response)
-                else:
-                    # Fallback to standard transformers interface
-                    inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
-            except Exception as e:
-                logger.warning(f"Moondream native interface failed: {e}. Using standard interface.")
-                inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
                 
         elif model_family == 'llava':
             # LLaVA-style formatting with proper conversation template
@@ -146,16 +164,15 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
                 # Fallback without image token
                 inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
 
-        # Generate response (skip if we already got one from Moondream native interface)
-        if 'response' not in locals():
+        # Generate response (skip if we already got one from Moondream)
+        if model_family != 'moondream':
             with torch.no_grad():
                 output_ids = model.generate(**inputs, **gen_kwargs)
             
             response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
-
-        # Clean the response based on model family
-        cleaned_response = clean_generative_response(response, model_family)
-        return cleaned_response
+            # Clean the response based on model family
+            cleaned_response = clean_generative_response(response, model_family)
+            return cleaned_response
 
     except Exception as e:
         logger.error(f"Error in generative prediction for {model_family}: {e}")
@@ -222,64 +239,32 @@ def clean_moondream_response(response: str) -> str:
     return response.strip()
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str, model_family: str = 'clip') -> str:
-    """Gets a prediction from a contrastive model with model-specific handling."""
+    """Gets a prediction from a contrastive model with the definitive SigLIP fix."""
     try:
-        # Prepare inputs based on model family
-        if model_family == 'biomed_clip':
-            # BiomedCLIP uses a custom wrapper - handle accordingly
-            if hasattr(processor, 'tokenizer'):  # Our custom wrapper
-                inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt")
-                # Move to device manually for custom wrapper
-                for key in inputs:
-                    if isinstance(inputs[key], torch.Tensor):
-                        inputs[key] = inputs[key].to(model.device)
-            else:
-                inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt").to(model.device)
-                
-        elif model_family == 'siglip':
-            # SigLIP uses SiglipProcessor
+        # --- THE FINAL FIX FOR SIGLIP ---
+        if model_family == 'siglip':
+            # SigLIP is sensitive to data types. We must ensure the image tensor
+            # matches the model's expected dtype (e.g., float16) to prevent the error.
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
+            inputs['pixel_values'] = inputs['pixel_values'].to(model.device, dtype=model.dtype)
+            inputs['input_ids'] = inputs['input_ids'].to(model.device)
+            inputs['attention_mask'] = inputs['attention_mask'].to(model.device)
+        else: # Standard logic for CLIP / BiomedCLIP
             inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
-            
-        elif model_family in ['clip', 'clip_like']:
-            # Standard CLIP models
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
-            
-        else:
-            # Generic contrastive model
-            try:
-                inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
-            except:
-                # Fallback without padding
-                inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
-            if model_family == 'biomed_clip' and hasattr(model, '__call__'):
-                # Custom BiomedCLIP wrapper
-                image_features, text_features, logit_scale = model(inputs['pixel_values'], inputs['input_ids'])
-                # Calculate similarities manually
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                similarities = (image_features @ text_features.T) * logit_scale.exp()
-                best_match_index = similarities.argmax().item()
-            else:
-                # Standard transformers models
-                outputs = model(**inputs)
-                if hasattr(outputs, 'logits_per_image'):
-                    best_match_index = outputs.logits_per_image.argmax().item()
-                elif hasattr(outputs, 'logits'):
-                    best_match_index = outputs.logits.argmax().item()
-                else:
-                    # Manual similarity calculation
-                    image_embeds = outputs.image_embeds
-                    text_embeds = outputs.text_embeds
-                    similarities = torch.cosine_similarity(image_embeds.unsqueeze(1), text_embeds.unsqueeze(0), dim=-1)
-                    best_match_index = similarities.argmax().item()
+            outputs = model(**inputs)
+            if hasattr(outputs, 'logits_per_image'): # For CLIP
+                best_match_index = outputs.logits_per_image.argmax().item()
+            else: # For SigLIP
+                best_match_index = outputs.logits.argmax().item()
         
         return caption1 if best_match_index == 0 else caption2
-        
+
     except Exception as e:
         logger.error(f"Error in contrastive prediction for {model_family}: {e}")
         return "ERROR"
+
 
 def _clear_gpu_cache_if_needed(step: int, config: AuditorConfig) -> None:
     """clear GPU cache periodically to prevent memory issues."""
