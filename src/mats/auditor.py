@@ -1,4 +1,4 @@
-# In src/mats/auditor.py
+# In src/mats/auditor.py mod
 import torch
 import json
 import logging
@@ -24,31 +24,22 @@ class AuditorConfig:
         self.clear_cache_frequency = clear_cache_frequency
 
 def detect_model_type(model, processor) -> Tuple[str, str]:
-    """
-    Detect the specific model type and family for proper handling.
-    Returns: (model_family, model_architecture)
-    """
+    """Detect the specific model type and family for proper handling."""
     model_name = getattr(model.config, '_name_or_path', '').lower()
-    model_type = getattr(model.config, 'model_type', '').lower()
     
-    # Check for specific model families
-    if 'llava' in model_name or 'llava' in model_type:
+    if 'llava' in model_name:
         return 'llava', 'generative'
     elif 'moondream' in model_name:
         return 'moondream', 'generative'
-    elif 'qwen' in model_name or 'qwen' in model_type:
+    elif 'qwen' in model_name:
         return 'qwen', 'generative'
-    elif 'siglip' in model_name or hasattr(model.config, 'text_config'):
+    elif 'siglip' in model_name:
         return 'siglip', 'contrastive'
-    elif 'clip' in model_name or 'clip' in model_type:
+    elif 'clip' in model_name:
         return 'clip', 'contrastive'
-    elif 'biomed' in model_name:
-        return 'biomed_clip', 'contrastive'
-    elif hasattr(model, 'get_text_features') and hasattr(model, 'get_image_features'):
-        # Generic CLIP-like model
+    elif hasattr(model, 'get_image_features') and hasattr(model, 'get_text_features'):
         return 'clip_like', 'contrastive'
     elif hasattr(model, 'generate'):
-        # Generic generative model
         return 'generic_generative', 'generative'
     else:
         logger.warning(f"Unknown model type: {model_name}. Attempting generic approach.")
@@ -56,123 +47,92 @@ def detect_model_type(model, processor) -> Tuple[str, str]:
 
 def build_prompt(caption: str, cognitive_map: str = None, model_family: str = 'generic') -> str:
     """builds the prompt, optionally including a cognitive map, tailored for specific models"""
-    
     base_question = f"Based on the image, is the following statement true or false? \"{caption}\""
     
     if cognitive_map:
-        map_context = (
+        prompt_text = (
             "A ground-truth 'cognitive map' of the scene is provided in JSON format.\n"
             "Based on both the image and this map, is the following statement true or false?\n\n"
             f"Cognitive Map:\n```json\n{cognitive_map}\n```\n\n"
             f"Statement: \"{caption}\"\n\n"
+            "Answer with only the single word 'true' or 'false'."
         )
     else:
-        map_context = base_question + "\n\n"
+        prompt_text = base_question
     
-    # Model-specific prompt formatting
-    if model_family == 'moondream':
-        # Moondream prefers simple, direct questions
-        if cognitive_map:
-            return map_context + "Answer: true or false"
-        else:
-            return base_question + " Answer: true or false"
-            
-    elif model_family == 'llava':
-        # LLaVA works well with structured prompts
-        if cognitive_map:
-            return map_context + "Please answer with only 'true' or 'false'."
-        else:
-            return base_question + " Please answer with only 'true' or 'false'."
-            
-    elif model_family == 'qwen':
-        # Qwen prefers conversational style
-        if cognitive_map:
-            return map_context + "Answer with only the single word 'true' or 'false'."
-        else:
-            return base_question + " Answer with only the single word 'true' or 'false'."
-    
-    else:
-        # Generic fallback
-        if cognitive_map:
-            return map_context + "Answer with only 'true' or 'false'."
-        else:
-            return base_question + " Answer with only 'true' or 'false'."
+    return prompt_text
 
 def get_generative_prediction(model, processor, image, caption: str, cognitive_map: str = None, model_family: str = 'generic') -> str:
-    """
-    Gets a 'true'/'false' prediction from a generative model with model-specific handling
-    """
+    """gets a 'true'/'false' prediction from a generative model with model-specific handling"""
     prompt_text = build_prompt(caption, cognitive_map, model_family)
 
     try:
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
         
         if model_family == 'moondream':
-            # Moondream2 uses its own special interface - FIXED
+            # FIXED MOONDREAM2 HANDLING
+            # Ensure image is properly prepared and on correct device with correct dtype
+            if isinstance(image, Image.Image):
+                # Convert PIL image to the format Moondream expects
+                image_tensor = processor(image).unsqueeze(0)
+            else:
+                image_tensor = image
+            
+            # Ensure correct device and dtype - critical for avoiding Half/Byte dtype errors
+            if hasattr(model, 'device'):
+                image_tensor = image_tensor.to(model.device)
+            if hasattr(model, 'dtype') and model.dtype != torch.uint8:
+                image_tensor = image_tensor.to(dtype=model.dtype)
+            elif not hasattr(model, 'dtype'):
+                # Default to float32 if model dtype is unclear
+                image_tensor = image_tensor.to(dtype=torch.float32)
+            
+            # Use Moondream's specific interface correctly
             try:
-                # Moondream2 requires: answer_question(image_embeds, prompt, tokenizer)
-                if hasattr(model, 'answer_question') and hasattr(model, 'encode_image'):
-                    # Encode the image first
-                    image_embeds = model.encode_image(image)
-                    # Use the answer_question method with correct arguments
-                    response = model.answer_question(image_embeds, prompt_text, processor.tokenizer)
-                    return clean_moondream_response(response)
+                # Encode image first
+                image_embeds = model.encode_image(image_tensor)
+                # Use answer_question method with proper arguments
+                response = model.answer_question(
+                    image_embeds=image_embeds, 
+                    question=prompt_text, 
+                    tokenizer=processor
+                )
+                return response.strip()
+            except Exception as moondream_error:
+                logger.warning(f"Moondream answer_question failed: {moondream_error}")
+                # Fallback to generate method if available
+                if hasattr(model, 'generate'):
+                    # Try standard generation as backup
+                    inputs = processor(text=prompt_text, images=image, return_tensors="pt")
+                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
+                    return response.strip()
                 else:
-                    logger.warning("Moondream2 methods not found, trying alternative approach")
-                    # Alternative: try with processor
-                    inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
-                    with torch.no_grad():
-                        output_ids = model.generate(**inputs, **gen_kwargs)
-                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
-                    return clean_moondream_response(response)
-                    
-            except Exception as e:
-                logger.error(f"Moondream2 native interface failed: {e}")
-                # Final fallback - try basic processor approach
-                try:
-                    inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
-                    with torch.no_grad():
-                        output_ids = model.generate(**inputs, **gen_kwargs)
-                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
-                    return clean_moondream_response(response)
-                except Exception as final_e:
-                    logger.error(f"All Moondream2 approaches failed: {final_e}")
-                    return "ERROR"
-        
+                    raise moondream_error
+            
         elif model_family == 'qwen':
             # Qwen-specific formatting
+            if processor.tokenizer.chat_template is None:
+                processor.tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ 'USER: ' + message['content'] }}{% elif message['role'] == 'assistant' %}{{ 'ASSISTANT: ' + message['content'] }}{% endif %}{% endfor %}"
             conversation = [{'image': image}, {'text': prompt_text}]
             full_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
-                
-        elif model_family == 'llava':
-            # LLaVA-style formatting with proper conversation template
+            
+        else: # LLaVA-style formatting
             full_prompt = f"USER: <image>\n{prompt_text}\nASSISTANT:"
             inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
-            
-            # LLaVA requires pad_token_id for generation
             if hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
                 gen_kwargs['pad_token_id'] = processor.tokenizer.pad_token_id
-                
-        else:
-            # Generic generative model approach
-            try:
-                # Try with image token placeholder
-                full_prompt = f"<image>\n{prompt_text}"
-                inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
-            except:
-                # Fallback without image token
-                inputs = processor(text=prompt_text, images=image, return_tensors="pt").to(model.device)
 
-        # Generate response (skip if we already got one from Moondream)
+        # For non-moondream models, use standard generation
         if model_family != 'moondream':
             with torch.no_grad():
                 output_ids = model.generate(**inputs, **gen_kwargs)
             
             response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
-            # Clean the response based on model family
-            cleaned_response = clean_generative_response(response, model_family)
-            return cleaned_response
+            return response.split("ASSISTANT:")[-1].strip() if "ASSISTANT:" in response else response.strip()
 
     except Exception as e:
         logger.error(f"Error in generative prediction for {model_family}: {e}")
@@ -239,30 +199,82 @@ def clean_moondream_response(response: str) -> str:
     return response.strip()
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str, model_family: str = 'clip') -> str:
-    """Gets a prediction from a contrastive model with the definitive SigLIP fix."""
+    """Gets a prediction from a contrastive model with comprehensive SigLIP and CLIP handling."""
     try:
-        # --- THE FINAL FIX FOR SIGLIP ---
-        if model_family == 'siglip':
-            # SigLIP is sensitive to data types. We must ensure the image tensor
-            # matches the model's expected dtype (e.g., float16) to prevent the error.
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
-            inputs['pixel_values'] = inputs['pixel_values'].to(model.device, dtype=model.dtype)
-            inputs['input_ids'] = inputs['input_ids'].to(model.device)
-            inputs['attention_mask'] = inputs['attention_mask'].to(model.device)
-        else: # Standard logic for CLIP / BiomedCLIP
-            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True).to(model.device)
+        # Process inputs
+        inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
 
+        # COMPREHENSIVE FIX FOR SIGLIP AND OTHER CONTRASTIVE MODELS
+        # Ensure attention_mask exists - this is critical for SigLIP
+        if 'attention_mask' not in inputs:
+            # Create attention mask based on input_ids if it doesn't exist
+            if 'input_ids' in inputs:
+                inputs['attention_mask'] = torch.ones_like(inputs['input_ids'])
+            else:
+                logger.warning("No input_ids found to create attention_mask")
+        
+        # Enhanced device and dtype casting with error handling
+        device = getattr(model, 'device', torch.device('cpu'))
+        
+        for key in list(inputs.keys()):
+            if isinstance(inputs[key], torch.Tensor):
+                try:
+                    if key == 'pixel_values':
+                        # Handle pixel values with proper dtype
+                        if hasattr(model, 'dtype') and model.dtype != torch.uint8:
+                            inputs[key] = inputs[key].to(device, dtype=model.dtype)
+                        else:
+                            inputs[key] = inputs[key].to(device, dtype=torch.float32)
+                    else:
+                        # Handle text inputs (input_ids, attention_mask, etc.)
+                        inputs[key] = inputs[key].to(device)
+                except Exception as tensor_error:
+                    logger.warning(f"Failed to move {key} to device: {tensor_error}")
+                    # Remove problematic tensor rather than crash
+                    del inputs[key]
+        
+        # Validate we have minimum required inputs
+        required_keys = ['input_ids', 'pixel_values']
+        missing_keys = [key for key in required_keys if key not in inputs]
+        if missing_keys:
+            logger.error(f"Missing required inputs: {missing_keys}")
+            return "ERROR"
+        
         with torch.no_grad():
             outputs = model(**inputs)
-            if hasattr(outputs, 'logits_per_image'): # For CLIP
-                best_match_index = outputs.logits_per_image.argmax().item()
-            else: # For SigLIP
-                best_match_index = outputs.logits.argmax().item()
+            
+            # Handle different output formats
+            if hasattr(outputs, 'logits_per_image'):  
+                # CLIP-style output
+                logits = outputs.logits_per_image
+            elif hasattr(outputs, 'logits'):  
+                # SigLIP-style output
+                logits = outputs.logits
+            elif hasattr(outputs, 'similarity_scores'):
+                # Alternative similarity output
+                logits = outputs.similarity_scores
+            else:
+                # Try to find any tensor output that could be logits
+                for attr_name in dir(outputs):
+                    attr_value = getattr(outputs, attr_name)
+                    if isinstance(attr_value, torch.Tensor) and attr_value.dim() >= 1:
+                        logits = attr_value
+                        break
+                else:
+                    logger.error("Could not find logits in model output")
+                    return "ERROR"
+            
+            # Get the best match
+            if logits.dim() > 1:
+                best_match_index = logits.argmax(dim=-1).item()
+            else:
+                best_match_index = logits.argmax().item()
         
         return caption1 if best_match_index == 0 else caption2
 
     except Exception as e:
         logger.error(f"Error in contrastive prediction for {model_family}: {e}")
+        logger.error(f"Available inputs keys: {list(inputs.keys()) if 'inputs' in locals() else 'N/A'}")
         return "ERROR"
 
 
@@ -283,83 +295,42 @@ def _validate_inputs(model, processor, model_type: str, dataset) -> None:
     if model is None or processor is None:
         raise ValueError("Model and processor cannot be None")
 
-def run_comparative_text_audit(model, processor, model_type: str = None, dataset=None, config: dict = None, use_maps: bool = False):
-    """
-    A unified audit function that intelligently handles both generative and contrastive models
-    and can optionally run in a "map-assisted" mode.
-    """
-    # Import locally to avoid circular dependencies
-    from . import perturbations, metrics
-    
-    # Auto-detect model type if not provided
-    if model_type is None:
-        model_family, model_type = detect_model_type(model, processor)
-        logger.info(f"Auto-detected model: {model_family} ({model_type})")
-    else:
-        model_family, _ = detect_model_type(model, processor)
-        logger.info(f"Using provided model_type: {model_type}, detected family: {model_family}")
-    
-    _validate_inputs(model, processor, model_type, dataset)
+def run_comparative_text_audit(model, processor, dataset, use_maps: bool = False):
+    model_family, model_type = detect_model_type(model, processor)
     
     results = []
     audit_mode = "Map-Assisted" if use_maps else "Baseline"
-    config = config or AuditorConfig()
     
-    logger.info(f"Starting {audit_mode} audit for {model_family} model ({model_type})")
-    
-    for step, item in enumerate(tqdm(dataset, desc=f"Auditing {audit_mode} ({model_type})")):
-        try:
-            original_caption = item['caption']
-            perturbed_caption, was_changed = perturbations.perturb_spatial_words(original_caption)
-            if not was_changed:
-                continue
+    for item in tqdm(dataset, desc=f"Auditing {audit_mode} ({model_family})"):
+        original_caption = item['caption']
+        perturbed_caption, was_changed = perturbations.perturb_spatial_words(original_caption)
+        if not was_changed:
+            continue
 
-            cognitive_map = item.get("cognitive_map") if use_maps else None
+        cognitive_map = item.get("cognitive_map") if use_maps else None
+        
+        if model_type == 'generative':
+            orig_resp = get_generative_prediction(model, processor, item['image'], original_caption, cognitive_map, model_family)
+            pert_resp = get_generative_prediction(model, processor, item['image'], perturbed_caption, cognitive_map, model_family)
             
-            if model_type == 'generative':
-                orig_resp = get_generative_prediction(
-                    model, processor, item['image'], original_caption, cognitive_map, model_family
-                )
-                pert_resp = get_generative_prediction(
-                    model, processor, item['image'], perturbed_caption, cognitive_map, model_family
-                )
-                
-                norm_orig = metrics.normalize_response(orig_resp)
-                norm_pert = metrics.normalize_response(pert_resp)
-                consistency = metrics.check_text_consistency(norm_orig, norm_pert)
-
-            elif model_type == 'contrastive':
-                # Note: Maps are not typically used with contrastive models
-                best_caption = get_contrastive_prediction(
-                    model, processor, item['image'], original_caption, perturbed_caption, model_family
-                )
-                consistency = 'CONSISTENT' if best_caption == original_caption else 'INCONSISTENT'
+            # Clean responses using the cleaning functions
+            norm_orig = clean_generative_response(orig_resp, model_family)
+            norm_pert = clean_generative_response(pert_resp, model_family)
             
-            else:
-                logger.error(f"Unknown model_type: {model_type}")
-                consistency = 'ERROR'
+            consistency = metrics.check_text_consistency(norm_orig, norm_pert)
+        elif model_type == 'contrastive':
+            best_caption = get_contrastive_prediction(model, processor, item['image'], original_caption, perturbed_caption, model_family)
+            consistency = 'CONSISTENT' if best_caption == original_caption else 'INCONSISTENT'
+        else:
+            consistency = 'ERROR'
             
-            results.append({
-                'consistency': consistency,
-                'original_caption': original_caption,
-                'perturbed_caption': perturbed_caption,
-                'model_family': model_family,
-                'model_type': model_type
-            })
-            
-            # Clear cache periodically
-            _clear_gpu_cache_if_needed(step, config)
-            
-        except Exception as e:
-            logger.error(f"Error processing item {step}: {e}")
-            results.append({
-                'consistency': 'ERROR',
-                'error': str(e),
-                'model_family': model_family,
-                'model_type': model_type
-            })
-    
-    logger.info(f"Completed audit with {len(results)} results")
+        results.append({
+            'consistency': consistency, 
+            'relation_type': item.get('relation_type'),
+            'model_family': model_family,
+            'model_type': model_type
+        })
+        
     return results
 
 def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
