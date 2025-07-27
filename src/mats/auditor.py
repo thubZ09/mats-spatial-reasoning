@@ -1,4 +1,4 @@
-# In src/mats/auditor.py mod
+# In src/mats/auditor.py mod1
 import torch
 import json
 import logging
@@ -70,47 +70,101 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
         
         if model_family == 'moondream':
-            # FIXED MOONDREAM2 HANDLING
-            # Ensure image is properly prepared and on correct device with correct dtype
-            if isinstance(image, Image.Image):
-                # Convert PIL image to the format Moondream expects
-                image_tensor = processor(image).unsqueeze(0)
-            else:
-                image_tensor = image
-            
-            # Ensure correct device and dtype - critical for avoiding Half/Byte dtype errors
-            if hasattr(model, 'device'):
-                image_tensor = image_tensor.to(model.device)
-            if hasattr(model, 'dtype') and model.dtype != torch.uint8:
-                image_tensor = image_tensor.to(dtype=model.dtype)
-            elif not hasattr(model, 'dtype'):
-                # Default to float32 if model dtype is unclear
-                image_tensor = image_tensor.to(dtype=torch.float32)
-            
-            # Use Moondream's specific interface correctly
+            # COMPREHENSIVE MOONDREAM2 FIX
             try:
-                # Encode image first
-                image_embeds = model.encode_image(image_tensor)
-                # Use answer_question method with proper arguments
-                response = model.answer_question(
-                    image_embeds=image_embeds, 
-                    question=prompt_text, 
-                    tokenizer=processor
-                )
-                return response.strip()
-            except Exception as moondream_error:
-                logger.warning(f"Moondream answer_question failed: {moondream_error}")
-                # Fallback to generate method if available
-                if hasattr(model, 'generate'):
-                    # Try standard generation as backup
-                    inputs = processor(text=prompt_text, images=image, return_tensors="pt")
-                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                # Method 1: Try the proper Moondream2 interface
+                if hasattr(model, 'answer_question'):
+                    # Ensure image is in correct format
+                    if isinstance(image, Image.Image):
+                        # Use the processor to prepare the image properly
+                        processed_image = processor(image)
+                        if isinstance(processed_image, dict) and 'pixel_values' in processed_image:
+                            image_tensor = processed_image['pixel_values']
+                        else:
+                            image_tensor = processed_image
+                    else:
+                        image_tensor = image
+                    
+                    # Ensure proper tensor format and device
+                    if not isinstance(image_tensor, torch.Tensor):
+                        image_tensor = torch.tensor(image_tensor)
+                    
+                    if image_tensor.dim() == 3:
+                        image_tensor = image_tensor.unsqueeze(0)
+                    
+                    # Move to device and ensure correct dtype
+                    device = getattr(model, 'device', torch.device('cpu'))
+                    image_tensor = image_tensor.to(device)
+                    
+                    # Fix dtype issues - ensure float32 for image processing
+                    if image_tensor.dtype == torch.uint8:
+                        image_tensor = image_tensor.float() / 255.0
+                    elif image_tensor.dtype != torch.float32:
+                        image_tensor = image_tensor.to(torch.float32)
+                    
+                    # Encode image first
+                    with torch.no_grad():
+                        image_embeds = model.encode_image(image_tensor)
+                        
+                        # FIXED: Ensure prompt_text is a string, not list
+                        if isinstance(prompt_text, list):
+                            prompt_text = prompt_text[0]
+                        
+                        # Use answer_question with correct parameters
+                        response = model.answer_question(
+                            image_embeds=image_embeds, 
+                            question=str(prompt_text),  # Ensure string type
+                            tokenizer=processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+                        )
+                        return str(response).strip()
+                
+                # Method 2: Fallback to generate method
+                elif hasattr(model, 'generate'):
+                    # Prepare inputs using processor
+                    if hasattr(processor, 'tokenizer'):
+                        # Process text and image separately then combine
+                        text_inputs = processor.tokenizer(prompt_text, return_tensors="pt")
+                        if isinstance(image, Image.Image):
+                            image_inputs = processor(images=image, return_tensors="pt")
+                        else:
+                            image_inputs = {"pixel_values": image}
+                        
+                        # Combine inputs
+                        inputs = {**text_inputs, **image_inputs}
+                    else:
+                        # Use processor directly
+                        inputs = processor(text=prompt_text, images=image, return_tensors="pt")
+                    
+                    # Move to device
+                    device = getattr(model, 'device', torch.device('cpu'))
+                    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+                    
+                    # Fix tensor dtypes
+                    if 'pixel_values' in inputs:
+                        pixel_values = inputs['pixel_values']
+                        if pixel_values.dtype == torch.uint8:
+                            inputs['pixel_values'] = pixel_values.float() / 255.0
+                        elif pixel_values.dtype != torch.float32:
+                            inputs['pixel_values'] = pixel_values.to(torch.float32)
+                    
                     with torch.no_grad():
                         output_ids = model.generate(**inputs, **gen_kwargs)
-                    response = processor.batch_decode(output_ids, skip_special_tokens=True)[-1]
+                    
+                    response = processor.tokenizer.decode(output_ids[0], skip_special_tokens=True) if hasattr(processor, 'tokenizer') else processor.decode(output_ids[0], skip_special_tokens=True)
+                    
+                    # Clean the response to remove the input prompt
+                    if prompt_text in response:
+                        response = response.replace(prompt_text, "").strip()
+                    
                     return response.strip()
+                
                 else:
-                    raise moondream_error
+                    logger.error("Moondream model has no supported generation method")
+                    return "ERROR"
+                    
+            except Exception as moondream_error:
+                logger.error(f"Moondream processing failed: {moondream_error}")
+                return "ERROR"
             
         elif model_family == 'qwen':
             # Qwen-specific formatting
@@ -201,37 +255,74 @@ def clean_moondream_response(response: str) -> str:
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str, model_family: str = 'clip') -> str:
     """Gets a prediction from a contrastive model with comprehensive SigLIP and CLIP handling."""
     try:
-        # Process inputs
-        inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
-
-        # COMPREHENSIVE FIX FOR SIGLIP AND OTHER CONTRASTIVE MODELS
-        # Ensure attention_mask exists - this is critical for SigLIP
-        if 'attention_mask' not in inputs:
-            # Create attention mask based on input_ids if it doesn't exist
-            if 'input_ids' in inputs:
-                inputs['attention_mask'] = torch.ones_like(inputs['input_ids'])
-            else:
-                logger.warning("No input_ids found to create attention_mask")
+        # COMPREHENSIVE SIGLIP AND CONTRASTIVE MODEL FIX
         
-        # Enhanced device and dtype casting with error handling
+        # Get model device and dtype information
         device = getattr(model, 'device', torch.device('cpu'))
+        model_dtype = getattr(model, 'dtype', torch.float32)
         
+        # Process inputs with proper error handling
+        try:
+            inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
+        except Exception as proc_error:
+            logger.error(f"Processor failed: {proc_error}")
+            # Try alternative processing
+            try:
+                inputs = processor(text=[caption1, caption2], images=[image], return_tensors="pt", padding=True)
+            except Exception:
+                return "ERROR"
+
+        # CRITICAL FIX FOR SIGLIP DTYPE ISSUES
+        # Ensure attention_mask exists and handle all tensor dtypes properly
+        if 'attention_mask' not in inputs and 'input_ids' in inputs:
+            inputs['attention_mask'] = torch.ones_like(inputs['input_ids'])
+        
+        # Enhanced device and dtype casting with comprehensive error handling
         for key in list(inputs.keys()):
             if isinstance(inputs[key], torch.Tensor):
                 try:
+                    # Move to device first
+                    inputs[key] = inputs[key].to(device)
+                    
+                    # Handle dtype conversion based on tensor type
                     if key == 'pixel_values':
-                        # Handle pixel values with proper dtype
-                        if hasattr(model, 'dtype') and model.dtype != torch.uint8:
-                            inputs[key] = inputs[key].to(device, dtype=model.dtype)
-                        else:
-                            inputs[key] = inputs[key].to(device, dtype=torch.float32)
+                        # Image tensors - handle byte to float conversion carefully
+                        if inputs[key].dtype == torch.uint8:
+                            # Convert uint8 to float and normalize
+                            inputs[key] = inputs[key].float() / 255.0
+                        elif inputs[key].dtype != model_dtype and model_dtype != torch.uint8:
+                            # Convert to model dtype if it's not uint8
+                            if model_dtype == torch.float16:
+                                inputs[key] = inputs[key].to(torch.float16)
+                            else:
+                                inputs[key] = inputs[key].to(torch.float32)
+                        # Special handling for SigLIP which might expect specific dtypes
+                        if model_family == 'siglip' and inputs[key].dtype == torch.float64:
+                            inputs[key] = inputs[key].to(torch.float32)
+                            
+                    elif key in ['input_ids', 'attention_mask']:
+                        # Text tensors should remain as long integers
+                        if inputs[key].dtype != torch.long:
+                            inputs[key] = inputs[key].to(torch.long)
+                    
                     else:
-                        # Handle text inputs (input_ids, attention_mask, etc.)
-                        inputs[key] = inputs[key].to(device)
+                        # Other tensors - convert to appropriate dtype
+                        if inputs[key].dtype == torch.uint8 and key != 'pixel_values':
+                            inputs[key] = inputs[key].to(torch.long)
+                        elif model_dtype != torch.uint8 and inputs[key].dtype != model_dtype:
+                            if inputs[key].dtype in [torch.uint8, torch.int8] and model_dtype in [torch.float16, torch.float32]:
+                                inputs[key] = inputs[key].to(model_dtype)
+                                
                 except Exception as tensor_error:
-                    logger.warning(f"Failed to move {key} to device: {tensor_error}")
-                    # Remove problematic tensor rather than crash
-                    del inputs[key]
+                    logger.warning(f"Failed to process tensor {key}: {tensor_error}")
+                    # For non-critical tensors, we can try to continue without them
+                    if key not in ['input_ids', 'pixel_values']:
+                        logger.warning(f"Removing problematic tensor: {key}")
+                        del inputs[key]
+                    else:
+                        # For critical tensors, this is an error
+                        logger.error(f"Critical tensor {key} failed processing")
+                        return "ERROR"
         
         # Validate we have minimum required inputs
         required_keys = ['input_ids', 'pixel_values']
@@ -240,8 +331,45 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
             logger.error(f"Missing required inputs: {missing_keys}")
             return "ERROR"
         
+        # Additional validation for tensor shapes and dtypes
+        try:
+            if 'pixel_values' in inputs:
+                pv = inputs['pixel_values']
+                logger.debug(f"pixel_values shape: {pv.shape}, dtype: {pv.dtype}")
+                
+            if 'input_ids' in inputs:
+                ii = inputs['input_ids']
+                logger.debug(f"input_ids shape: {ii.shape}, dtype: {ii.dtype}")
+        except Exception as debug_error:
+            logger.debug(f"Debug logging failed: {debug_error}")
+        
+        # Model inference with comprehensive error handling
         with torch.no_grad():
-            outputs = model(**inputs)
+            try:
+                outputs = model(**inputs)
+            except RuntimeError as runtime_error:
+                error_msg = str(runtime_error)
+                if "dtype" in error_msg.lower() and ("half" in error_msg.lower() or "byte" in error_msg.lower()):
+                    logger.error(f"Dtype mismatch error: {error_msg}")
+                    # Try to fix dtype issues by ensuring all tensors are float32
+                    for key in inputs:
+                        if isinstance(inputs[key], torch.Tensor) and inputs[key].dtype in [torch.uint8, torch.int8, torch.float16]:
+                            if key == 'pixel_values':
+                                if inputs[key].dtype == torch.uint8:
+                                    inputs[key] = inputs[key].float() / 255.0
+                                else:
+                                    inputs[key] = inputs[key].to(torch.float32)
+                            elif key not in ['input_ids', 'attention_mask']:
+                                inputs[key] = inputs[key].to(torch.float32)
+                    
+                    # Retry inference
+                    try:
+                        outputs = model(**inputs)
+                    except Exception as retry_error:
+                        logger.error(f"Retry failed: {retry_error}")
+                        return "ERROR"
+                else:
+                    raise runtime_error
             
             # Handle different output formats
             if hasattr(outputs, 'logits_per_image'):  
@@ -256,12 +384,15 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
             else:
                 # Try to find any tensor output that could be logits
                 for attr_name in dir(outputs):
-                    attr_value = getattr(outputs, attr_name)
-                    if isinstance(attr_value, torch.Tensor) and attr_value.dim() >= 1:
-                        logits = attr_value
-                        break
+                    if not attr_name.startswith('_'):
+                        attr_value = getattr(outputs, attr_name)
+                        if isinstance(attr_value, torch.Tensor) and attr_value.dim() >= 1:
+                            logits = attr_value
+                            logger.debug(f"Using {attr_name} as logits tensor")
+                            break
                 else:
                     logger.error("Could not find logits in model output")
+                    logger.error(f"Available attributes: {[attr for attr in dir(outputs) if not attr.startswith('_')]}")
                     return "ERROR"
             
             # Get the best match
@@ -275,6 +406,8 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
     except Exception as e:
         logger.error(f"Error in contrastive prediction for {model_family}: {e}")
         logger.error(f"Available inputs keys: {list(inputs.keys()) if 'inputs' in locals() else 'N/A'}")
+        logger.error(f"Model device: {getattr(model, 'device', 'unknown')}")
+        logger.error(f"Model dtype: {getattr(model, 'dtype', 'unknown')}")
         return "ERROR"
 
 
