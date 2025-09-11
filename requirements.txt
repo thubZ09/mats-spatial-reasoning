@@ -1,2 +1,8 @@
- transformers_stream_generator
- open_clip_torch
+transformers_stream_generator
+open_clip_torch
+torch
+transformers
+pillow
+pandas
+numpy
+tqdm
