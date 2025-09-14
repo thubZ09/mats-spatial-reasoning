@@ -35,12 +35,12 @@ def ensure_pil_image(image):
 
 def perturb_spatial_words(sentence: str) -> tuple[str, bool]:
     """
-    Perturbs spatial words in a sentence and returns both the modified sentence
-    and a flag indicating if any changes were made.
+    perturbs spatial words in a sentence and returns both the modified sentence
+    and a flag indicating if any changes were made
     """
     original = sentence
     
-    # Step 1: Replace all matches with unique placeholders
+    #replace all matches with unique placeholders
     placeholders = {}
     for pattern, replacement in SWAP_DICTIONARY.items():
         placeholder = f"__{replacement.upper().replace(' ', '_')}__"
@@ -48,11 +48,11 @@ def perturb_spatial_words(sentence: str) -> tuple[str, bool]:
         if count > 0:
             placeholders[placeholder] = replacement
     
-    # Step 2: Replace placeholders with final values
+    #replace placeholders with final values
     for placeholder, replacement in placeholders.items():
         sentence = sentence.replace(placeholder, replacement)
     
-    # Check if any changes were made
+    #check if any changes were made
     was_changed = (original.lower() != sentence.lower())
     
     if was_changed:
@@ -63,7 +63,7 @@ def perturb_spatial_words(sentence: str) -> tuple[str, bool]:
     return sentence, was_changed
 
 def rotate_image(image, angle=15):
-    """Rotate image by specified angle."""
+    """rotate image by specified angle"""
     try:
         img = ensure_pil_image(image)
         return img.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
@@ -72,7 +72,7 @@ def rotate_image(image, angle=15):
         return image
 
 def flip_image_horizontally(image):
-    """Flip image left-to-right."""
+    """flip image left-to-right"""
     try:
         img = ensure_pil_image(image)
         return img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
@@ -82,12 +82,12 @@ def flip_image_horizontally(image):
 
 def generate_cognitive_map(caption: str) -> str:
     """
-    Creates a simple, rule-based cognitive map from a VSR caption.
-    This map represents a "perfect understanding" of the caption's statement.
-    Example: "The cat is to the left of the dog." -> places cat at x=4, dog at x=6.
+    creates a simple, rule-based cognitive map from a VSR caption.
+    this map represents a "perfect understanding" of the caption's statement
+    example: "The cat is to the left of the dog." -> places cat at x=4, dog at x=6
     """
     try:
-        # A simple parser for "The [obj1] is [relation] the [obj2]."
+        #a simple parser for "The [obj1] is [relation] the [obj2]"
         parts = caption.replace('.', '').lower().split()
         if len(parts) < 5: return None
 
@@ -96,7 +96,7 @@ def generate_cognitive_map(caption: str) -> str:
         relation = " ".join(parts[2:-1])
 
         map_data = {"objects": []}
-        # Define positions based on the relation
+        #define positions based on the relation
         if "left" in relation:
             map_data["objects"].append({"name": obj1, "position": {"x": 0.25, "y": 0.5}})
             map_data["objects"].append({"name": obj2, "position": {"x": 0.75, "y": 0.5}})
@@ -110,11 +110,11 @@ def generate_cognitive_map(caption: str) -> str:
             map_data["objects"].append({"name": obj1, "position": {"x": 0.5, "y": 0.75}})
             map_data["objects"].append({"name": obj2, "position": {"x": 0.5, "y": 0.25}})
         else:
-            # For other relations, just place them apart as a default
+            #for other relations, just place them apart as a default
             map_data["objects"].append({"name": obj1, "position": {"x": 0.25, "y": 0.5}})
             map_data["objects"].append({"name": obj2, "position": {"x": 0.75, "y": 0.5}})
 
         return json.dumps(map_data, indent=2)
     except Exception:
-        # If the caption format is unexpected, we can't create a map.
+        #if the caption format is unexpected, we can't create a map.
         return None

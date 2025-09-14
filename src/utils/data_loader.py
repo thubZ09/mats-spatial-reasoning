@@ -1,4 +1,3 @@
-# src/utils/data_loader.py
 import os
 import json
 import requests
@@ -15,11 +14,11 @@ from datasets import load_dataset
 
 logger = logging.getLogger(__name__)
 
-# Global cache directory for lazy initialization
+#global cache directory for lazy initialization
 _vsr_cache = {}
 
 def get_vsr_cache_paths():
-    """Returns paths to VSR cache and image directories, creating them if necessary."""
+    """returns paths to VSR cache and image directories, creating them if necessary"""
     if "image_dir" not in _vsr_cache:
         cache_dir = os.path.join(tempfile.gettempdir(), "vsr_cache")
         image_dir = os.path.join(cache_dir, "images")
@@ -29,15 +28,13 @@ def get_vsr_cache_paths():
     return _vsr_cache["cache_dir"], _vsr_cache["image_dir"]
 
 def download_vsr_images():
-    """Download and extract VSR images with progress tracking"""
+    """download and extract VSR images with progress tracking"""
     cache_dir, image_dir = get_vsr_cache_paths()
     
-    # Skip if images already exist
+    #skip if images already exist
     if os.path.exists(image_dir) and len(os.listdir(image_dir)) > 1000:
         logger.info("Using cached VSR images")
         return image_dir
-    
-    # Download the zip file
     zip_path = os.path.join(cache_dir, "vsr_images.zip")
     url = "https://www.dropbox.com/scl/fi/efvlqxp4zhxfp60m1hujd/vsr_images.zip?rlkey=3w3d8dxbt7xgq64pyh7zosnzm&e=1&st=7ltz5qqh&dl=1"
     
@@ -56,8 +53,8 @@ def download_vsr_images():
             size = f.write(data)
             bar.update(size)
     
-    # Extract the zip file
-    logger.info("Extracting images...")
+    #extract the zip file
+    logger.info("extracting images...")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         for member in tqdm(zip_ref.infolist(), desc="Extracting"):
             try:
@@ -65,14 +62,14 @@ def download_vsr_images():
             except zipfile.error as e:
                 logger.warning(f"Skipping invalid file {member.filename}: {e}")
     
-    # Move images to proper directory
+    #move images to proper directory
     extracted_dir = os.path.join(cache_dir, "vsr_images")
     if os.path.exists(extracted_dir):
         for file_name in os.listdir(extracted_dir):
             shutil.move(os.path.join(extracted_dir, file_name), image_dir)
         shutil.rmtree(extracted_dir)
     
-    # Verify we have sufficient images
+    #verify we have sufficient images
     if len(os.listdir(image_dir)) < 1000:
         raise RuntimeError("Insufficient images downloaded")
     
@@ -83,14 +80,14 @@ def download_vsr_images():
 def load_vsr_dataset(split='test', num_samples=100):
     """Main function to load VSR dataset with comprehensive error handling"""
     try:
-        # Download images first
+        #download images first
         image_dir = download_vsr_images()
         
-        # Load dataset metadata from Hugging Face
+        #load dataset metadata from Hugging Face
         logger.info(f"Loading VSR metadata for {split} split")
         dataset = load_dataset("cambridgeltl/vsr_random", split=split)
         
-        # Filter and process samples
+        #filter and process samples
         samples = []
         valid_count = 0
         skipped = 0
@@ -99,7 +96,7 @@ def load_vsr_dataset(split='test', num_samples=100):
             if valid_count >= num_samples:
                 break
                 
-            # Only use validated true statements
+            #only use validated true statements
             if item.get('label', 0) != 1:
                 skipped += 1
                 continue
@@ -131,7 +128,7 @@ def load_vsr_dataset(split='test', num_samples=100):
         return create_fallback_dataset(num_samples)
 
 def create_fallback_dataset(num_samples):
-    """Create synthetic fallback dataset with more samples"""
+    """create synthetic fallback dataset with more samples"""
     logger.error("Using synthetic fallback dataset")
     samples = []
     relations = ['left', 'right', 'above', 'below', 'front', 'behind']
@@ -149,23 +146,23 @@ def create_fallback_dataset(num_samples):
     return samples
 
 def create_synthetic_image(caption, size=(400, 400)):
-    """Create better synthetic images with visual relationships"""
+    """create better synthetic images with visual relationships"""
     from PIL import Image, ImageDraw, ImageFont
     
     img = Image.new("RGB", size, (240, 240, 240))
     draw = ImageDraw.Draw(img)
     
-    # Try to load font
+    #try to load font
     try:
         font = ImageFont.truetype("Arial", 14)
     except:
         font = None
     
-    # Draw caption
+    #draw caption
     draw.rectangle([10, 10, size[0]-10, 40], fill=(220, 220, 255))
     draw.text((20, 15), caption, fill=(0, 0, 0), font=font)
     
-    # Draw objects based on relation
+    #draw objects based on relation
     obj_a_pos, obj_b_pos = (100, 200), (300, 200)
     
     if 'left' in caption:
@@ -181,7 +178,7 @@ def create_synthetic_image(caption, size=(400, 400)):
     elif 'behind' in caption:
         obj_a_pos, obj_b_pos = (250, 200), (200, 200)
     
-    # Draw objects
+    #draw objects
     draw.ellipse(
         [obj_a_pos[0]-30, obj_a_pos[1]-30, obj_a_pos[0]+30, obj_a_pos[1]+30],
         fill=(255, 100, 100)
@@ -191,7 +188,7 @@ def create_synthetic_image(caption, size=(400, 400)):
         fill=(100, 100, 255)
     )
     
-    # Draw labels
+    #draw labels
     draw.text((obj_a_pos[0]-10, obj_a_pos[1]-40), "A", fill=(0, 0, 0), font=font)
     draw.text((obj_b_pos[0]-10, obj_b_pos[1]-40), "B", fill=(0, 0, 0), font=font)
     

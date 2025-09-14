@@ -26,12 +26,10 @@ class MapBuilder:
     
     def build_map(self, pil_img: Image.Image, threshold: float = 0.7) -> Optional[str]:
         """
-        build a cognitive map from an image using object detection.
-        
+        builds a cognitive map from an image using object detection        
         Args:
             pil_img: PIL Image to process
-            threshold: Confidence threshold for detections (0.0-1.0)
-            
+            threshold: Confidence threshold for detections (0.0-1.0)            
         Returns:
             JSON string of detected objects or None if failed
         """
@@ -45,7 +43,7 @@ class MapBuilder:
                 {
                     "label": obj["label"],
                     "confidence": round(obj["score"], 3),  #include confidence for debugging
-                    "xy": [round(c, 2) for c in obj["box"].values()]  # Keep original "xy" naming
+                    "xy": [round(c, 2) for c in obj["box"].values()]  #keep original "xy" naming
                 }
                 for obj in detections if obj["score"] > threshold
             ]
@@ -55,7 +53,7 @@ class MapBuilder:
             
         except Exception as e:
             logger.error(f"Error during map building: {e}")
-            return json.dumps([])  # Return empty list on error
+            return json.dumps([])  #return empty list on error
 
 #convenience function for backward compatibility
 def build_map(pil_img: Image.Image, threshold: float = 0.7) -> Optional[str]:

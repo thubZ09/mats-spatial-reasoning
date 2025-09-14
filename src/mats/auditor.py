@@ -1,4 +1,3 @@
-# In src/mats/auditor.py mod1
 import torch
 import json
 import logging
@@ -24,7 +23,7 @@ class AuditorConfig:
         self.clear_cache_frequency = clear_cache_frequency
 
 def detect_model_type(model, processor) -> Tuple[str, str]:
-    """Detect the specific model type and family for proper handling."""
+    """to detect the specific model type and family for proper handling"""
     model_name = getattr(model.config, '_name_or_path', '').lower()
     
     if 'llava' in model_name:
@@ -63,20 +62,16 @@ def build_prompt(caption: str, cognitive_map: str = None, model_family: str = 'g
     return prompt_text
 
 def get_generative_prediction(model, processor, image, caption: str, cognitive_map: str = None, model_family: str = 'generic') -> str:
-    """gets a 'true'/'false' prediction from a generative model with model-specific handling"""
+    """gets a 'T/F' prediction with model-specific handling"""
     prompt_text = build_prompt(caption, cognitive_map, model_family)
 
     try:
         gen_kwargs = {"max_new_tokens": 10, "do_sample": False}
-        
+            #Did not use this (moondream) in the final version
         if model_family == 'moondream':
-            # COMPREHENSIVE MOONDREAM2 FIX
             try:
-                # Method 1: Try the proper Moondream2 interface
                 if hasattr(model, 'answer_question'):
-                    # Ensure image is in correct format
                     if isinstance(image, Image.Image):
-                        # Use the processor to prepare the image properly
                         processed_image = processor(image)
                         if isinstance(processed_image, dict) and 'pixel_values' in processed_image:
                             image_tensor = processed_image['pixel_values']
@@ -85,61 +80,49 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
                     else:
                         image_tensor = image
                     
-                    # Ensure proper tensor format and device
                     if not isinstance(image_tensor, torch.Tensor):
                         image_tensor = torch.tensor(image_tensor)
                     
                     if image_tensor.dim() == 3:
                         image_tensor = image_tensor.unsqueeze(0)
                     
-                    # Move to device and ensure correct dtype
                     device = getattr(model, 'device', torch.device('cpu'))
                     image_tensor = image_tensor.to(device)
                     
-                    # Fix dtype issues - ensure float32 for image processing
                     if image_tensor.dtype == torch.uint8:
                         image_tensor = image_tensor.float() / 255.0
                     elif image_tensor.dtype != torch.float32:
                         image_tensor = image_tensor.to(torch.float32)
                     
-                    # Encode image first
                     with torch.no_grad():
                         image_embeds = model.encode_image(image_tensor)
                         
-                        # FIXED: Ensure prompt_text is a string, not list
                         if isinstance(prompt_text, list):
                             prompt_text = prompt_text[0]
                         
-                        # Use answer_question with correct parameters
                         response = model.answer_question(
                             image_embeds=image_embeds, 
-                            question=str(prompt_text),  # Ensure string type
+                            question=str(prompt_text),  
                             tokenizer=processor.tokenizer if hasattr(processor, 'tokenizer') else processor
                         )
                         return str(response).strip()
                 
-                # Method 2: Fallback to generate method
+                #fallback to generate method
                 elif hasattr(model, 'generate'):
-                    # Prepare inputs using processor
                     if hasattr(processor, 'tokenizer'):
-                        # Process text and image separately then combine
                         text_inputs = processor.tokenizer(prompt_text, return_tensors="pt")
                         if isinstance(image, Image.Image):
                             image_inputs = processor(images=image, return_tensors="pt")
                         else:
                             image_inputs = {"pixel_values": image}
                         
-                        # Combine inputs
                         inputs = {**text_inputs, **image_inputs}
                     else:
-                        # Use processor directly
                         inputs = processor(text=prompt_text, images=image, return_tensors="pt")
                     
-                    # Move to device
                     device = getattr(model, 'device', torch.device('cpu'))
                     inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
                     
-                    # Fix tensor dtypes
                     if 'pixel_values' in inputs:
                         pixel_values = inputs['pixel_values']
                         if pixel_values.dtype == torch.uint8:
@@ -152,7 +135,6 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
                     
                     response = processor.tokenizer.decode(output_ids[0], skip_special_tokens=True) if hasattr(processor, 'tokenizer') else processor.decode(output_ids[0], skip_special_tokens=True)
                     
-                    # Clean the response to remove the input prompt
                     if prompt_text in response:
                         response = response.replace(prompt_text, "").strip()
                     
@@ -167,20 +149,20 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
                 return "ERROR"
             
         elif model_family == 'qwen':
-            # Qwen-specific formatting
+            #Qwen-specific formatting
             if processor.tokenizer.chat_template is None:
                 processor.tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ 'USER: ' + message['content'] }}{% elif message['role'] == 'assistant' %}{{ 'ASSISTANT: ' + message['content'] }}{% endif %}{% endfor %}"
             conversation = [{'image': image}, {'text': prompt_text}]
             full_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
             
-        else: # LLaVA-style formatting
+        else: #LLaVA-style formatting
             full_prompt = f"USER: <image>\n{prompt_text}\nASSISTANT:"
             inputs = processor(text=full_prompt, images=image, return_tensors="pt").to(model.device)
             if hasattr(processor.tokenizer, 'pad_token_id') and processor.tokenizer.pad_token_id is not None:
                 gen_kwargs['pad_token_id'] = processor.tokenizer.pad_token_id
 
-        # For non-moondream models, use standard generation
+        #for non-moondream models, we use standard generation
         if model_family != 'moondream':
             with torch.no_grad():
                 output_ids = model.generate(**inputs, **gen_kwargs)
@@ -193,9 +175,9 @@ def get_generative_prediction(model, processor, image, caption: str, cognitive_m
         return "ERROR"
 
 def clean_generative_response(response: str, model_family: str) -> str:
-    """Clean and normalize responses from different generative models"""
+    """clean and normalize responses from different generative models"""
     
-    # Remove common prefixes/suffixes
+    #remove common prefixes/suffixes
     response = response.strip()
     
     if model_family == 'llava':
@@ -206,14 +188,14 @@ def clean_generative_response(response: str, model_family: str) -> str:
         return clean_moondream_response(response)
         
     elif model_family == 'qwen':
-        # Qwen sometimes includes the original prompt
+        #qwen sometimes includes the original prompt
         if "Answer with only" in response:
             response = response.split("Answer with only")[-1].strip()
     
-    # Generic cleaning
+    #generic cleaning
     response = response.lower().strip()
     
-    # Extract true/false from common patterns
+    #extract true/false from common patterns
     if 'true' in response and 'false' not in response:
         return 'true'
     elif 'false' in response and 'true' not in response:
@@ -223,7 +205,7 @@ def clean_generative_response(response: str, model_family: str) -> str:
     elif response.startswith('false'):
         return 'false'
     
-    # Handle yes/no responses
+    #handle yes/no responses
     if response.startswith('yes'):
         return 'true'
     elif response.startswith('no'):
@@ -231,12 +213,13 @@ def clean_generative_response(response: str, model_family: str) -> str:
     
     return response.strip()
 
+#Not included in the final experiment
 def clean_moondream_response(response: str) -> str:
     """Specific cleaning for Moondream2 responses"""
     response = response.strip().lower()
     
-    # Moondream sometimes gives verbose answers
-    # Look for key words in the response
+    #moondream sometimes gives verbose answers
+    #look for key words in the response
     if 'true' in response and 'false' not in response:
         return 'true'
     elif 'false' in response and 'true' not in response:
@@ -253,60 +236,58 @@ def clean_moondream_response(response: str) -> str:
     return response.strip()
 
 def get_contrastive_prediction(model, processor, image, caption1: str, caption2: str, model_family: str = 'clip') -> str:
-    """Gets a prediction from a contrastive model with comprehensive SigLIP and CLIP handling."""
+    """gets a prediction from a contrastive model with comprehensive SigLIP and CLIP handling."""
     try:
-        # COMPREHENSIVE SIGLIP AND CONTRASTIVE MODEL FIX
         
         # Get model device and dtype information
         device = getattr(model, 'device', torch.device('cpu'))
         model_dtype = getattr(model, 'dtype', torch.float32)
         
-        # Process inputs with proper error handling
+        #process inputs with proper error handling
         try:
             inputs = processor(text=[caption1, caption2], images=image, return_tensors="pt", padding=True)
         except Exception as proc_error:
             logger.error(f"Processor failed: {proc_error}")
-            # Try alternative processing
+            #try alternative processing
             try:
                 inputs = processor(text=[caption1, caption2], images=[image], return_tensors="pt", padding=True)
             except Exception:
                 return "ERROR"
 
-        # CRITICAL FIX FOR SIGLIP DTYPE ISSUES
-        # Ensure attention_mask exists and handle all tensor dtypes properly
+        #CRITICAL FIX FOR SIGLIP DTYPE ISSUES
+        #ensuring attention_mask exists and handle all tensor dtypes properly
         if 'attention_mask' not in inputs and 'input_ids' in inputs:
             inputs['attention_mask'] = torch.ones_like(inputs['input_ids'])
         
-        # Enhanced device and dtype casting with comprehensive error handling
+        #enhanced device and dtype casting with comprehensive error handling
         for key in list(inputs.keys()):
             if isinstance(inputs[key], torch.Tensor):
                 try:
-                    # Move to device first
                     inputs[key] = inputs[key].to(device)
                     
-                    # Handle dtype conversion based on tensor type
+                    #handle dtype conversion based on tensor type
                     if key == 'pixel_values':
-                        # Image tensors - handle byte to float conversion carefully
+                        #img tensors - handle byte to float conversion carefully
                         if inputs[key].dtype == torch.uint8:
-                            # Convert uint8 to float and normalize
+                            #convert uint8 to float and normalize
                             inputs[key] = inputs[key].float() / 255.0
                         elif inputs[key].dtype != model_dtype and model_dtype != torch.uint8:
-                            # Convert to model dtype if it's not uint8
+                            #convert to model dtype if it's not uint8
                             if model_dtype == torch.float16:
                                 inputs[key] = inputs[key].to(torch.float16)
                             else:
                                 inputs[key] = inputs[key].to(torch.float32)
-                        # Special handling for SigLIP which might expect specific dtypes
+                        #special handling for SigLIP which might expect specific dtypes
                         if model_family == 'siglip' and inputs[key].dtype == torch.float64:
                             inputs[key] = inputs[key].to(torch.float32)
                             
                     elif key in ['input_ids', 'attention_mask']:
-                        # Text tensors should remain as long integers
+                        #text tensors should remain as long integers
                         if inputs[key].dtype != torch.long:
                             inputs[key] = inputs[key].to(torch.long)
                     
                     else:
-                        # Other tensors - convert to appropriate dtype
+                        #other tensors - convert to appropriate dtype
                         if inputs[key].dtype == torch.uint8 and key != 'pixel_values':
                             inputs[key] = inputs[key].to(torch.long)
                         elif model_dtype != torch.uint8 and inputs[key].dtype != model_dtype:
@@ -315,23 +296,23 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
                                 
                 except Exception as tensor_error:
                     logger.warning(f"Failed to process tensor {key}: {tensor_error}")
-                    # For non-critical tensors, we can try to continue without them
+                    #for non-critical tensors, we can try to continue without them
                     if key not in ['input_ids', 'pixel_values']:
                         logger.warning(f"Removing problematic tensor: {key}")
                         del inputs[key]
                     else:
-                        # For critical tensors, this is an error
+                        #for critical tensors, this is an error
                         logger.error(f"Critical tensor {key} failed processing")
                         return "ERROR"
         
-        # Validate we have minimum required inputs
+        #validate we have minimum required inputs
         required_keys = ['input_ids', 'pixel_values']
         missing_keys = [key for key in required_keys if key not in inputs]
         if missing_keys:
             logger.error(f"Missing required inputs: {missing_keys}")
             return "ERROR"
         
-        # Additional validation for tensor shapes and dtypes
+        #additional validation for tensor shapes and dtypes
         try:
             if 'pixel_values' in inputs:
                 pv = inputs['pixel_values']
@@ -343,7 +324,7 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
         except Exception as debug_error:
             logger.debug(f"Debug logging failed: {debug_error}")
         
-        # Model inference with comprehensive error handling
+        #model inference with comprehensive error handling
         with torch.no_grad():
             try:
                 outputs = model(**inputs)
@@ -351,7 +332,7 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
                 error_msg = str(runtime_error)
                 if "dtype" in error_msg.lower() and ("half" in error_msg.lower() or "byte" in error_msg.lower()):
                     logger.error(f"Dtype mismatch error: {error_msg}")
-                    # Try to fix dtype issues by ensuring all tensors are float32
+                    #try to fix dtype issues by ensuring all tensors are float32
                     for key in inputs:
                         if isinstance(inputs[key], torch.Tensor) and inputs[key].dtype in [torch.uint8, torch.int8, torch.float16]:
                             if key == 'pixel_values':
@@ -362,7 +343,7 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
                             elif key not in ['input_ids', 'attention_mask']:
                                 inputs[key] = inputs[key].to(torch.float32)
                     
-                    # Retry inference
+                    #retry inference
                     try:
                         outputs = model(**inputs)
                     except Exception as retry_error:
@@ -371,18 +352,18 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
                 else:
                     raise runtime_error
             
-            # Handle different output formats
+            #handle different output formats
             if hasattr(outputs, 'logits_per_image'):  
-                # CLIP-style output
+                #CLIP-style output
                 logits = outputs.logits_per_image
             elif hasattr(outputs, 'logits'):  
-                # SigLIP-style output
+                #SigLIP-style output
                 logits = outputs.logits
             elif hasattr(outputs, 'similarity_scores'):
-                # Alternative similarity output
+                #alternative similarity output
                 logits = outputs.similarity_scores
             else:
-                # Try to find any tensor output that could be logits
+                #try to find any tensor output that could be logits
                 for attr_name in dir(outputs):
                     if not attr_name.startswith('_'):
                         attr_value = getattr(outputs, attr_name)
@@ -395,7 +376,7 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
                     logger.error(f"Available attributes: {[attr for attr in dir(outputs) if not attr.startswith('_')]}")
                     return "ERROR"
             
-            # Get the best match
+            #get the best match
             if logits.dim() > 1:
                 best_match_index = logits.argmax(dim=-1).item()
             else:
@@ -412,13 +393,13 @@ def get_contrastive_prediction(model, processor, image, caption1: str, caption2:
 
 
 def _clear_gpu_cache_if_needed(step: int, config: AuditorConfig) -> None:
-    """clear GPU cache periodically to prevent memory issues."""
+    """clear GPU cache periodically to prevent memory issues"""
     if torch.cuda.is_available() and step % config.clear_cache_frequency == 0:
         torch.cuda.empty_cache()
         logger.debug(f"Cleared GPU cache at step {step}")
 
 def _validate_inputs(model, processor, model_type: str, dataset) -> None:
-    """Validate inputs to the audit function."""
+    """validate inputs to the audit function"""
     if model_type not in ['generative', 'contrastive']:
         raise ValueError(f"Unsupported model_type: '{model_type}'. Must be 'generative' or 'contrastive'")
     
@@ -446,7 +427,7 @@ def run_comparative_text_audit(model, processor, dataset, use_maps: bool = False
             orig_resp = get_generative_prediction(model, processor, item['image'], original_caption, cognitive_map, model_family)
             pert_resp = get_generative_prediction(model, processor, item['image'], perturbed_caption, cognitive_map, model_family)
             
-            # Clean responses using the cleaning functions
+            #clean responses using the cleaning functions
             norm_orig = clean_generative_response(orig_resp, model_family)
             norm_pert = clean_generative_response(pert_resp, model_family)
             
@@ -468,13 +449,11 @@ def run_comparative_text_audit(model, processor, dataset, use_maps: bool = False
 
 def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Analyze the results of an audit and provide summary statistics.
-    
+    analyze the results of an audit and provide summary statistics   
     Args:
-        results: List of audit results
-    
+        results: List of audit results   
     Returns:
-        Dict containing analysis summary
+        dict containing analysis summary
     """
     if not results:
         return {"error": "No results to analyze"}
@@ -484,7 +463,7 @@ def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     inconsistent = sum(1 for r in results if r['consistency'] == 'INCONSISTENT')
     errors = sum(1 for r in results if r['consistency'] == 'ERROR')
     
-    # Get model info from results
+    #get model info from results
     model_info = {}
     for result in results:
         if 'model_family' in result:
@@ -492,7 +471,7 @@ def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             model_info['type'] = result.get('model_type', 'unknown')
             break
     
-    # Analyze by relation type if available
+    #analyze by relation type if available
     relation_stats = {}
     for result in results:
         rel_type = result.get('relation_type', 'unknown')
@@ -502,7 +481,7 @@ def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         if result['consistency'] == 'CONSISTENT':
             relation_stats[rel_type]['consistent'] += 1
     
-    # Calculate consistency rates by relation type
+    #calculate consistency rates by relation type
     for rel_type in relation_stats:
         stats = relation_stats[rel_type]
         stats['consistency_rate'] = stats['consistent'] / stats['total'] if stats['total'] > 0 else 0
