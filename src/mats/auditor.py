@@ -5,7 +5,9 @@ from PIL import Image
 import numpy as np
 from tqdm import tqdm
 from typing import Dict, List, Any, Optional, Tuple
+
 from . import perturbations, metrics
+from .metrics import MATSMetrics, normalize_response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -446,6 +448,27 @@ def run_comparative_text_audit(model, processor, dataset, use_maps: bool = False
         })
         
     return results
+
+def compute_mats_metrics(audit_results: List[Dict]) -> Dict:
+    """convert audit results to metrics"""
+    metrics = MATSMetrics()
+    
+    scs_data = []
+    for result in audit_results:
+        if 'original_response' in result:
+            scs_data.append({
+                'relation': result.get('relation_type', 'unknown'),
+                'original_raw': result['original_response'],
+                'inverted_raw': result['perturbed_response']
+            })
+    
+    eval_result = metrics.evaluate_model('YourModel', scs_data, [])  #compute metrics
+    
+    return {
+        'scs': eval_result.scs * 100,  #convert to percentage
+        'per_relation_scs': {k: v*100 for k, v in eval_result.per_relation_scs.items()},
+        'coverage': eval_result.coverage * 100
+    }
 
 def analyze_audit_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """

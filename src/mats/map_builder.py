@@ -1,3 +1,7 @@
+"""
+NOTE: EXPERIMENTAL/NOT USED FOR THE PAPER
+"""
+
 import torch
 import json
 from transformers import pipeline
@@ -26,11 +30,12 @@ class MapBuilder:
     
     def build_map(self, pil_img: Image.Image, threshold: float = 0.7) -> Optional[str]:
         """
-        builds a cognitive map from an image using object detection        
-        Args:
+        builds a cognitive map from an image using object detection  
+
+        args:
             pil_img: PIL Image to process
             threshold: Confidence threshold for detections (0.0-1.0)            
-        Returns:
+        returns:
             JSON string of detected objects or None if failed
         """
         if not self.detector:
@@ -57,6 +62,6 @@ class MapBuilder:
 
 #convenience function for backward compatibility
 def build_map(pil_img: Image.Image, threshold: float = 0.7) -> Optional[str]:
-    """Legacy function wrapper for the original API"""
+    """legacy function wrapper for the original API"""
     builder = MapBuilder()
     return builder.build_map(pil_img, threshold)

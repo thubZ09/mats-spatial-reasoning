@@ -19,9 +19,11 @@ class ModelWrapperInterface:
     required methods (semantic contract)
     - encode_image(image: PIL.Image) -> torch.Tensor
         return a CPU tensor (1 x D) or device tensor (1 x D) that represents pooled image features
+
     - generate_answer(image: PIL.Image, prompt_text: str, max_new_tokens: int = 32, **gen_kwargs) -> str
         run the model in inference mode with the provided prompt and return the generated string
     - get_module_by_name(dotted_name: str) -> torch.nn.Module
+
         resolve and return a module/submodule by a dotted path e.g., "vision_model.encoder.layers.12.cross_attn"
     - run_forward_for_activation(image: PIL.Image, prompt_text: str, module_name: str) -> torch.Tensor
         run a forward pass that triggers the module and returns its activation
@@ -41,12 +43,11 @@ class ModelWrapperInterface:
     def run_forward_for_activation(self, image: Image.Image, prompt_text: str, module_name: str) -> torch.Tensor:
         raise NotImplementedError
 
-
-#fill with your model's actual calls
+#try for your model
 class ModelWrapperExample(ModelWrapperInterface):
     """
     example adapter showing the minimal wrapper shape
-    replace internals with your LLaVA wrapper's real calls (tokenizer, image processor, model.generate, etc.)
+    replace internals with your LLaVA wrapper's real calls (tokenizer, image processor, model.generate, etc)
     """
 
     def __init__(self, model=None, tokenizer=None, vision_processor=None, device: str = "cuda"):

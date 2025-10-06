@@ -106,12 +106,12 @@ def patch_module_output(module: torch.nn.Module, donor_activation: torch.Tensor,
     context manager that temporarily wraps module.forward so that its output is
     blended with donor_activation
 
-      - donor_activation is expected to be a tensor compatible with the module's output shape.
-      - blend = 1.0 -> fully donor; blend = 0.0 -> original behavior.
-      - We implement wrapper by calling the original forward and mixing:
+      - donor_activation is expected to be a tensor compatible with the module's output shape
+      - blend = 1.0 -> fully donor; blend = 0.0 -> original behavior
+      - we implement wrapper by calling the original forward and mixing:
             out' = (1-blend)*orig_out + blend*donor_activation
-      - This approach is pragmatic, it works for many common modules but may fail
-        for modules that return tuples, views, or rely on in-place ops. Use with caution.
+      - this approach is pragmatic, it works for many common modules but may fail
+        for modules that return tuples, views, or rely on in-place ops. Use with caution
     """
     if not isinstance(donor_activation, torch.Tensor):
         raise ValueError("donor_activation must be a torch.Tensor (cpu or device)")
@@ -181,7 +181,7 @@ def run_single_patch_trial(
       - dL2_to_donor (float): L2(after, donor_emb) - L2(before, donor_emb)
       - prefer_before (int): 1 if before preferred correct_text, else 0
       - prefer_after (int): 1 if after preferred correct_text, else 0
-      - additional debug fields...
+      - additional debug fields..
     """
     device_t = device
     model.to(device_t)
@@ -192,11 +192,11 @@ def run_single_patch_trial(
     target_inputs = processor(images=[target_image], text=[absurd_text], return_tensors="pt", padding=True)
     target_inputs = {k: v.to(device_t) for k, v in target_inputs.items()}
 
-    #1)compute donor activation at module
+    #compute donor activation at module
     module = resolve_module_by_name(model, module_name)
     donor_act = record_module_output(model, module, donor_inputs, device_t)
 
-    #2)compute 'before' embeddings for target image (without patch)
+    #compute 'before' embeddings for target image (without patch)
     with torch.no_grad():
         targ_img_emb_before = model.get_image_features(pixel_values=target_inputs['pixel_values'].to(device_t)).detach().cpu()
         candidate_texts = [correct_text, absurd_text]
@@ -207,7 +207,7 @@ def run_single_patch_trial(
     sims_before = (targ_img_before_n @ text_embs.T).squeeze(0).numpy()
     prefer_before = int(sims_before[0] >= sims_before[1])
 
-    #3)apply patch (monkeypatch module.forward) while running corrupted input
+    #apply patch (monkeypatch module.forward) while running corrupted input
     with patch_module_output(module, donor_act, blend=blend):
         with torch.no_grad():
             targ_img_emb_after = model.get_image_features(pixel_values=target_inputs['pixel_values'].to(device_t)).detach().cpu()
@@ -266,7 +266,7 @@ def run_patch_batch(
 
     `modules_to_test` is a list of dotted module paths to test.
 
-returns the saved CSV filepath
+    returns the saved CSV filepath
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,3 @@
-# src/mats/perturbations.py
 import re
 from PIL import Image
 import logging
@@ -82,12 +81,12 @@ def flip_image_horizontally(image):
 
 def generate_cognitive_map(caption: str) -> str:
     """
-    creates a simple, rule-based cognitive map from a VSR caption.
+    creates a simple, rule-based cognitive map from a VSR caption
     this map represents a "perfect understanding" of the caption's statement
-    example: "The cat is to the left of the dog." -> places cat at x=4, dog at x=6
+    e.g: "The cat is to the left of the dog" -> places cat at x=4, dog at x=6
     """
     try:
-        #a simple parser for "The [obj1] is [relation] the [obj2]"
+        #a simple parser for "the [obj1] is [relation] the [obj2]"
         parts = caption.replace('.', '').lower().split()
         if len(parts) < 5: return None
 
@@ -116,5 +115,5 @@ def generate_cognitive_map(caption: str) -> str:
 
         return json.dumps(map_data, indent=2)
     except Exception:
-        #if the caption format is unexpected, we can't create a map.
+
         return None
