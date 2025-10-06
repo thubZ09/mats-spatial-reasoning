@@ -61,7 +61,7 @@ def encode_texts(model: CLIPModel, processor: CLIPProcessor, device: str, texts:
 def resolve_module_by_name(model: torch.nn.Module, dotted: str) -> torch.nn.Module:
     """
     given a model and a dotted module path ("vision_model.encoder.layers.8.mlp"),
-    return the nn.Module object, raises KeyError if not found.
+    return the nn.Module object, raises KeyError if not found
     """
     parts = dotted.split(".")
     mod = model
