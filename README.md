@@ -187,9 +187,10 @@ If you find this work useful, please cite:
 ```bash
 @article{thube2025mats,
   title={Pathological Truth Bias in Vision-Language Models},
-  author={Thube, Yash},
+  author={Yash Thube},
   journal={arXiv preprint arXiv:2509.22674},
   year={2025}
+}
 ```
 ## License
 The project is licensed under the MIT License - see [LICENSE](LICENSE.md) file for details.
