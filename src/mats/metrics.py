@@ -8,7 +8,6 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-
 class ModelResponse(Enum):
     """enum for parsed model responses"""
     TRUE = "TRUE"
