@@ -5,8 +5,9 @@
 
 
 [![arXiv](https://img.shields.io/badge/arXiv-2509.22674-b31b1b.svg)](https://arxiv.org/abs/2509.22674)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![HuggingFace](https://img.shields.io/badge/🤗-Dataset-yellow)](https://huggingface.co/datasets/thubZ9/mats-dataset)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-purple.svg)](https://www.python.org/downloads/)
 
 
 </div>
@@ -57,7 +58,7 @@ scs_data = [
     {
         'relation': 'left',
         'original_raw': 'TRUE',
-        'inverted_raw': 'TRUE'  # Pathological: should flip to FALSE
+        'inverted_raw': 'TRUE'  #Pathological: should flip to FALSE
     },
     # ... more examples
 ]
@@ -65,9 +66,9 @@ scs_data = [
 iar_data = [
     {
         'category': 'spatial',
-        'raw_response': 'TRUE'  # Incorrect: absurd statement
+        'raw_response': 'TRUE'  #Incorrect: absurd statement
     },
-    # ... more examples
+    # .. more examples
 ]
 
 #evaluate model
@@ -146,6 +147,79 @@ df = pd.read_csv(results_path)
 success_rate = df['success'].mean()
 print(f"Patch success rate: {success_rate:.1%}") 
 ```
+## Dataset structure
+### Schema
+
+All splits share identical features for compatibility:
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `example_id` | `string` | Unique identifier | `"vsr_000000224045"` |
+| `image` | `Image` | PIL Image object | COCO image |
+| `statement` | `string` | Spatial description | `"The dog is in front of the tree"` |
+| `relation` | `string` | Spatial relation | `"left"`, `"right"`, `"above"`, `"below"`, `"front"`, `"behind"` |
+| `is_true` | `bool` | Whether statement matches image | `true` or `false` |
+| `objects` | `List[str]` | Objects in statement | `["dog", "tree"]` |
+| `split` | `string` | Dataset split | `"vsr"`, `"absurd"`, `"patching"` |
+| `metadata` | `string` | JSON string with split-specific data | See below |
+
+### Metadata format
+
+The `metadata` field contains JSON-encoded split-specific information.
+
+<summary><b>VSR example</b></summary>
+
+```json
+{
+  "example_id": "vsr_000000224045",
+  "image": "<PIL.Image>",
+  "statement": "The person is at the left side of the dining table.",
+  "relation": "left",
+  "is_true": true,
+  "objects": ["person", "dining", "table"],
+  "split": "test",
+  "metadata": "{}"
+
+  Purpose - Tests baseline spatial reasoning ability.
+}
+```
+<summary><b>Absurd example</b></summary>
+
+```json
+{
+  "example_id": "absurd_0000",
+  "image": "<PIL.Image>",
+  "statement": "The bear is to the left side of the person.",
+  "relation": "left",
+  "is_true": false,
+  "objects": ["bear", "person"],
+  "split": "absurd",
+  "metadata": "{\"category\": \"spatial\", \"is_absurd\": true, \"original_statement\": \"The bear is to the right side of the person.\", \"original_relation\": \"right\"}"
+
+  Purpose - Tests for pathological truth bias (models incorrectly agreeing with false statements)
+}
+```
+<summary><b>Patching example</b></summary>
+
+```json
+{
+  "example_id": "patch_0000",
+  "image": "<PIL.Image>",
+  "statement": "The couch is behind the skateboard.",
+  "relation": "behind",
+  "is_true": true,
+  "objects": ["couch", "skateboard"],
+  "split": "patching",
+  "metadata": "{\"absurd_text\": \"The couch is front the skateboard.\", \"inverted_relation\": \"front\", \"has_donor_target_pair\": true}"
+  
+  Purpose - Supports activation patching for mechanistic interpretability research.
+}
+```
+### Notes
+- Objects field - May include spatial relation words due to heuristic extraction. For clean object lists, parse the `statement` field directly. 
+- Image format - All images are RGB JPEGs from COCO dataset. 
+- Metadata parsing - Always use `json.loads()` to parse the metadata field.
+- VSR split naming - Uses "test" as split value (inherited from source VSR dataset)
 
 ## Metrics reference  
 **Spatial Consistency Score (SCS)**  
